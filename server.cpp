@@ -14,8 +14,6 @@
 #include <vector>
 #include <sstream>
 #include <cctype>
-#include <mutex>
-#include <thread>
 #include <csignal>
 
 #define QUEUE_LENGTH 10
@@ -75,8 +73,6 @@ class Server {
     char keyNotFoundErr[sizeof("ERROR: requested key not found in store\n")] = "ERROR: requested key not found in store\n";
 
     std::unordered_map<std::string, std::string> pairs;
-    // ponytail: global lock, per-key locks if store throughput matters
-    std::mutex pairsMutex;
 
     int setupSocket(char *port) {
         memset(&hints, 0, sizeof hints);
@@ -148,10 +144,7 @@ class Server {
     bool processGet(ClientSession& client) {
         try {
             std::string associatedVal;
-            {
-                std::lock_guard<std::mutex> lock(pairsMutex);
-                associatedVal = pairs.at(client.key);
-            }
+            associatedVal = pairs.at(client.key);
 
             std::string getResponse = "Key: " + client.key + "\tValue: " + associatedVal + "\n";
             if (send(client.socketfd, getResponse.data(), getResponse.size(), 0) == -1) {
@@ -168,11 +161,7 @@ class Server {
     }
 
     bool processDelete(ClientSession& client) {
-        std::size_t erased;
-        {
-            std::lock_guard<std::mutex> lock(pairsMutex);
-            erased = pairs.erase(client.key);
-        }
+        std::size_t erased = pairs.erase(client.key);
 
         if (erased == 0) {
             if (send(client.socketfd, keyNotFoundErr, sizeof keyNotFoundErr, 0) == -1) {
@@ -207,14 +196,11 @@ class Server {
         std::string associatedVal;
         bool keyExists = true;
 
-        {
-            std::lock_guard<std::mutex> lock(pairsMutex);
-            try {
-                associatedVal = pairs.at(client.key);
-            } catch (std::out_of_range) {
-                pairs.insert({client.key, client.value});
-                keyExists = false;
-            }
+        try {
+            associatedVal = pairs.at(client.key);
+        } catch (std::out_of_range) {
+            pairs.insert({client.key, client.value});
+            keyExists = false;
         }
 
         if (keyExists) {
@@ -363,7 +349,7 @@ public:
                 continue;
             }
 
-            std::thread(&Server::handleConnection, this, incomingfd).detach();
+            handleConnection(incomingfd);
         }
 
         close(sockfd);
