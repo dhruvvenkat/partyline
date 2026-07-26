@@ -95,11 +95,11 @@ int getListenerSocket(void) {
     return listener;
 }
 
-void addToPFDs(struct pollfd **pfds, int newfd, int *fdCount, int *fdSize) {
-    if (*fdCount == *fdSize) {
-        *fdSize *= 2;
-        *pfds = (struct pollfd *)realloc(*pfds, sizeof(**pfds) * (*fdSize));
-    }
+void addToPFDs(std::vector<struct pollfd> *pfds, int newfd, int *fdCount, int *fdSize) {
+    // if (*fdCount == *fdSize) {
+    //     *fdSize *= 2;
+    //     *pfds = (struct pollfd *)realloc(*pfds, sizeof(**pfds) * (*fdSize));
+    // }
 
     (*pfds)[*fdCount].fd = newfd;
     (*pfds)[*fdCount].events = POLLIN;
@@ -108,12 +108,12 @@ void addToPFDs(struct pollfd **pfds, int newfd, int *fdCount, int *fdSize) {
     (*fdCount)++;
 }
 
-void removePFD(struct pollfd pfds[], int i, int *fdCount) {
+void removePFD(std::vector<struct pollfd> *pfds, int i, int *fdCount) {
     pfds[i] = pfds[*fdCount - 1];
     (*fdCount)--;
 }
 
-void handleConnection(int listener, int *fdCount, int *fdSize, struct pollfd **pfds) {
+void handleConnection(int listener, int *fdCount, int *fdSize, std::vector<struct pollfd> *pfds) {
     struct sockaddr_storage incomingAddr;
     socklen_t addrlen;
     int incomingfd;
@@ -131,11 +131,11 @@ void handleConnection(int listener, int *fdCount, int *fdSize, struct pollfd **p
     }
 }
 
-void handleClients(int listener, int *fdCount, struct pollfd *pfds, int *pfd_i) {
+void handleClients(int listener, int *fdCount, std::vector<struct pollfd> *pfds, int *pfd_i) {
     char buf[256];
-    int numBytes = recv(pfds[*pfd_i].fd, buf, sizeof buf, 0);
+    int numBytes = recv((*pfds)[*pfd_i].fd, buf, sizeof buf, 0);
 
-    int senderfd = pfds[*pfd_i].fd;
+    int senderfd = (*pfds)[*pfd_i].fd;
 
     if (numBytes <= 0) {
         if (numBytes == 0) {
@@ -144,7 +144,7 @@ void handleClients(int listener, int *fdCount, struct pollfd *pfds, int *pfd_i) 
             perror("recv");
         }
 
-        close(pfds[*pfd_i].fd);
+        close((*pfds)[*pfd_i].fd);
         removePFD(pfds, *pfd_i, fdCount);
 
         (*pfd_i)--;
@@ -152,7 +152,7 @@ void handleClients(int listener, int *fdCount, struct pollfd *pfds, int *pfd_i) 
         std::cout << "pollserver: recv from fd " << senderfd << ": " << buf;
 
         for (int j = 0; j < *fdCount; j++) {
-            int destfd = pfds[j].fd;
+            int destfd = (*pfds)[j].fd;
 
             if (destfd != listener && destfd != senderfd) {
                 if (send(destfd, buf, numBytes, 0) == -1) {
@@ -163,13 +163,13 @@ void handleClients(int listener, int *fdCount, struct pollfd *pfds, int *pfd_i) 
     }
 }
 
-void processExistingConnections(int listener, int *fdCount, int *fdSize, struct pollfd **pfds) {
+void processExistingConnections(int listener, int *fdCount, int *fdSize, std::vector<struct pollfd> *pfds) {
     for (int i = 0; i < *fdCount; i++) {
         if ((*pfds)[i].revents & (POLLIN | POLLHUP)) {
             if ((*pfds)[i].fd == listener) {
                 handleConnection(listener, fdCount, fdSize, pfds);
             } else {
-                handleClients(listener, fdCount,  *pfds, &i);
+                handleClients(listener, fdCount,  pfds, &i);
             }
 
         }
@@ -182,7 +182,9 @@ int main(void) {
     int fdSize = 5; // starting off with room for 5 connections;
     int fdCount = 0;
     // TODO: SWITCH TO NEW INSTEAD OF MALLOC
-    struct pollfd *pfds = (pollfd *)malloc(sizeof *pfds * fdSize);
+    //struct pollfd *pfds = (pollfd *)malloc(sizeof *pfds * fdSize);
+    std::vector<struct pollfd> pfds(fdSize);
+
 
     // generate a listener and add that as the first pollfd entry
     listener = getListenerSocket();
@@ -200,7 +202,7 @@ int main(void) {
     puts("pollserver: waiting for connections...");
 
     while (true) {
-        int pollCount = poll(pfds, fdCount, -1);
+        int pollCount = poll(pfds.data(), fdCount, -1);
 
         if (pollCount == -1) {
             perror("poll");
@@ -209,6 +211,4 @@ int main(void) {
 
         processExistingConnections(listener, &fdCount, &fdSize, &pfds);
     }
-
-    free(pfds); // free once done
 }
