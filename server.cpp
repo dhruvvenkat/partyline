@@ -23,6 +23,16 @@
 #define QUEUE_LENGTH 10
 #define MAX_DATA_SIZE 100
 
+void signalHandler(int sig) {
+    if (sig == 2) {
+        std::cout << "\npollserver interrupted, shutting down..." << std::endl;
+        exit(sig);
+    }
+
+    std::cout << "Interrupt handle " << sig << std::endl;
+    exit(sig);
+}
+
 const char *inet_ntop2(void *addr, char *buf, size_t size) {
 
     struct sockaddr_storage *sas = static_cast<sockaddr_storage *>(addr);
@@ -119,7 +129,7 @@ void handleConnection(int listener, int *fdCount, int *fdSize, std::vector<struc
     int incomingfd;
     char remoteIP[INET6_ADDRSTRLEN];
 
-    addrlen = sizeof remoteIP;
+    addrlen = sizeof incomingAddr;
     incomingfd = accept(listener, (struct sockaddr *)&incomingAddr, &addrlen);
 
     if (incomingfd == -1) {
@@ -177,6 +187,8 @@ void processExistingConnections(int listener, int *fdCount, int *fdSize, std::ve
 }
 
 int main(void) {
+    signal(SIGINT, signalHandler);
+
     int listener;
 
     int fdSize = 5; // starting off with room for 5 connections;
