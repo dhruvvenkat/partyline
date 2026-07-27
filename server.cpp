@@ -105,25 +105,23 @@ int getListenerSocket(void) {
     return listener;
 }
 
-void addToPFDs(std::vector<struct pollfd> *pfds, int newfd, int *fdCount, int *fdSize) {
-    // if (*fdCount == *fdSize) {
-    //     *fdSize *= 2;
-    //     *pfds = (struct pollfd *)realloc(*pfds, sizeof(**pfds) * (*fdSize));
-    // }
+void addToPFDs(std::vector<struct pollfd> *pfds, int newfd) {
 
-    (*pfds)[*fdCount].fd = newfd;
-    (*pfds)[*fdCount].events = POLLIN;
-    (*pfds)[*fdCount].revents = 0;
+    struct pollfd newpfd;
+    newpfd.fd = newfd;
+    newpfd.events = POLLIN;
+    newpfd.revents = 0;
 
-    (*fdCount)++;
+    pfds->push_back(newpfd);
+
 }
 
-void removePFD(std::vector<struct pollfd> *pfds, int i, int *fdCount) {
-    pfds[i] = pfds[*fdCount - 1];
-    (*fdCount)--;
+void removePFD(std::vector<struct pollfd> *pfds, int i) {
+    (*pfds)[i] = pfds->back();
+    pfds->pop_back();
 }
 
-void handleConnection(int listener, int *fdCount, int *fdSize, std::vector<struct pollfd> *pfds) {
+void handleConnection(int listener, std::vector<struct pollfd> *pfds) {
     struct sockaddr_storage incomingAddr;
     socklen_t addrlen;
     int incomingfd;
@@ -135,13 +133,13 @@ void handleConnection(int listener, int *fdCount, int *fdSize, std::vector<struc
     if (incomingfd == -1) {
         perror("accept");
     } else {
-        addToPFDs(pfds, incomingfd, fdCount, fdSize);
+        addToPFDs(pfds, incomingfd);
 
         std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << std::endl;
     }
 }
 
-void handleClients(int listener, int *fdCount, std::vector<struct pollfd> *pfds, int *pfd_i) {
+void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i) {
     char buf[256];
     int numBytes = recv((*pfds)[*pfd_i].fd, buf, sizeof buf, 0);
 
@@ -155,13 +153,15 @@ void handleClients(int listener, int *fdCount, std::vector<struct pollfd> *pfds,
         }
 
         close((*pfds)[*pfd_i].fd);
-        removePFD(pfds, *pfd_i, fdCount);
+        removePFD(pfds, *pfd_i);
 
         (*pfd_i)--;
     } else {
-        std::cout << "pollserver: recv from fd " << senderfd << ": " << buf;
+        std::cout << "> pollserver: recv from fd " << senderfd << ": ";
+        std::cout.write(buf, numBytes);
+        std::cout << std::endl;
 
-        for (int j = 0; j < *fdCount; j++) {
+        for (int j = 0; j < (int)pfds->size(); j++) {
             int destfd = (*pfds)[j].fd;
 
             if (destfd != listener && destfd != senderfd) {
@@ -173,13 +173,13 @@ void handleClients(int listener, int *fdCount, std::vector<struct pollfd> *pfds,
     }
 }
 
-void processExistingConnections(int listener, int *fdCount, int *fdSize, std::vector<struct pollfd> *pfds) {
-    for (int i = 0; i < *fdCount; i++) {
+void processExistingConnections(int listener, std::vector<struct pollfd> *pfds) {
+    for (int i = 0; i < (int)pfds->size(); i++) {
         if ((*pfds)[i].revents & (POLLIN | POLLHUP)) {
             if ((*pfds)[i].fd == listener) {
-                handleConnection(listener, fdCount, fdSize, pfds);
+                handleConnection(listener, pfds);
             } else {
-                handleClients(listener, fdCount,  pfds, &i);
+                handleClients(listener, pfds, &i);
             }
 
         }
@@ -191,36 +191,28 @@ int main(void) {
 
     int listener;
 
-    int fdSize = 5; // starting off with room for 5 connections;
-    int fdCount = 0;
-    // TODO: SWITCH TO NEW INSTEAD OF MALLOC
-    //struct pollfd *pfds = (pollfd *)malloc(sizeof *pfds * fdSize);
-    std::vector<struct pollfd> pfds(fdSize);
+    std::vector<struct pollfd> pfds;
 
 
     // generate a listener and add that as the first pollfd entry
     listener = getListenerSocket();
+    pfds.push_back({listener, POLLIN, 0});
 
     if (listener == -1) {
         std::cerr << "error getting listening socket" << std::endl;
         exit(1);
     }
 
-    pfds[0].fd = listener;
-    pfds[0].events = POLLIN;
-
-    fdCount = 1;
-
     puts("pollserver: waiting for connections...");
 
     while (true) {
-        int pollCount = poll(pfds.data(), fdCount, -1);
+        int pollCount = poll(pfds.data(), pfds.size(), -1);
 
         if (pollCount == -1) {
             perror("poll");
             exit(1);
         }
 
-        processExistingConnections(listener, &fdCount, &fdSize, &pfds);
+        processExistingConnections(listener, &pfds);
     }
 }
