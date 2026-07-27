@@ -20,10 +20,14 @@
 #include <cctype>
 #include <csignal>
 #include <poll.h>
+#include <fcntl.h>
 
 #define PORT "1234"
 #define QUEUE_LENGTH 10
 #define MAX_DATA_SIZE 256
+
+constexpr int CLIENT_AWAITING_USERNAME = 0;
+constexpr int CLIENT_ACTIVE = 1;
 
 struct ClientConnection {
     int fd;
@@ -89,6 +93,7 @@ int getListenerSocket(void) {
 
     for (p = ai; p != NULL; p = p->ai_next) {
         listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        fcntl(listener, F_SETFL, O_NONBLOCK);
 
         if(listener < 0) {
             continue;
@@ -134,7 +139,7 @@ struct ClientConnection packClientStruct(int fd, std::string username) {
     newConnection.username = username;
     newConnection.currRoom = 0;
     newConnection.outputQueueSize = 0;
-    newConnection.clientState = 0;
+    newConnection.clientState = username.empty() ? CLIENT_AWAITING_USERNAME : CLIENT_ACTIVE;
 
     return newConnection;
 }
@@ -182,56 +187,32 @@ void handleConnection(int listener, std::vector<struct pollfd> *pfds, std::unord
     socklen_t addrlen;
     int incomingfd;
     char remoteIP[INET6_ADDRSTRLEN];
-    int numBytes;
-
-    char newClientUsername[MAX_DATA_SIZE];
-
     addrlen = sizeof incomingAddr;
     incomingfd = accept(listener, (struct sockaddr *)&incomingAddr, &addrlen);
 
     if (incomingfd == -1) {
-        perror("accept");
-    } else {
-        if (send(incomingfd, "enter your username: ", 22, 0) == -1) {
-            perror("server: username prompt did not work");
+        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            perror("accept");
         }
-
-        if ((numBytes = recv(incomingfd, newClientUsername, sizeof newClientUsername, 0)) <= 0) {
-            if (numBytes == -1) {
-                perror("server: username not receieved");
-            }
-            close(incomingfd);
-            return;
-        }
-
-        std::string username(newClientUsername, numBytes);
-        while (!username.empty() && (username.back() == '\n' || username.back() == '\r')) {
-            username.pop_back();
-        }
-        // for (const auto &[desc, client] : clients) {
-        //     if (client.username == newClientUsername) {
-        //         std::cerr << "server: user already exists";
-        //     }
-        // }
-
-        addToPFDs(pfds, incomingfd);
-        struct ClientConnection newClient = packClientStruct(incomingfd, username);
-
-
-        clients->insert({incomingfd, newClient});
-
-        std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << " with username " << username << std::endl;
-
-        std::cout << "\n+------+----------------+\n";
-        std::cout << "| FD   | Username       |\n";
-        std::cout << "+------+----------------+\n";
-
-        for (const auto& [fd, client] : *clients) {
-            std::cout << "| " << fd << "\t| " << client.username << '\n';
-        }
-
-        std::cout << "+------+----------------+\n";
+        return;
     }
+
+    if (fcntl(incomingfd, F_SETFL, O_NONBLOCK) == -1) {
+        perror("fcntl");
+        close(incomingfd);
+        return;
+    }
+
+    if (send(incomingfd, "enter your username: ", 21, MSG_NOSIGNAL) == -1) {
+        perror("server: username prompt did not work");
+        close(incomingfd);
+        return;
+    }
+
+    addToPFDs(pfds, incomingfd);
+    clients->insert({incomingfd, packClientStruct(incomingfd, "")});
+
+    std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << "; awaiting username" << std::endl;
 }
 
 void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, struct ClientConnection> *clients) {
@@ -240,14 +221,50 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
     struct ClientConnection *clientSender;
     try {
         clientSender = &clients->at(senderfd);
-    } catch (std::out_of_range) {
+    } catch (const std::out_of_range&) {
         std::cerr << "server: sending client not found" << std::endl;
         return;
     }
 
     int numBytes = recv(senderfd, clientSender->inputBuf, sizeof clientSender->inputBuf, 0);
 
-    if (numBytes <= 0) {
+    if (clientSender->clientState == CLIENT_AWAITING_USERNAME) {
+        if (numBytes > 0) {
+            std::string username(clientSender->inputBuf, numBytes);
+            while (!username.empty() && (username.back() == '\n' || username.back() == '\r')) {
+                username.pop_back();
+            }
+
+            clientSender->username = username;
+            clientSender->clientState = CLIENT_ACTIVE;
+
+            std::cout << "pollserver: user " << username << " connected on socket " << senderfd << std::endl;
+            std::cout << "\n+------+----------------+\n";
+            std::cout << "| FD   | Username       |\n";
+            std::cout << "+------+----------------+\n";
+
+            for (const auto& [fd, client] : *clients) {
+                std::cout << "| " << fd << "\t| " << client.username << '\n';
+            }
+
+            std::cout << "+------+----------------+\n";
+        } else if (numBytes == 0) {
+            close(senderfd);
+            removePFD(pfds, *pfd_i);
+            clients->erase(senderfd);
+            (*pfd_i)--;
+        } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
+            perror("recv username");
+            close(senderfd);
+            removePFD(pfds, *pfd_i);
+            clients->erase(senderfd);
+            (*pfd_i)--;
+        }
+
+        return;
+    }
+
+    if (numBytes == 0) {
         if (numBytes == 0) {
             std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
         } else {
@@ -259,7 +276,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         clients->erase(senderfd);
 
         (*pfd_i)--;
-    } else {
+    } else if (numBytes > 0) {
         std::cout << "> pollserver: recv from fd " << senderfd << ": ";
         std::cout.write(clientSender->inputBuf, numBytes);
         std::cout << std::endl;
@@ -274,6 +291,10 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                 }
             }
         }
+    } else if (numBytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        std::cout << "> pollserver: no data is available yet" << std::endl;
+    } else {
+        perror("recv");
     }
 }
 
