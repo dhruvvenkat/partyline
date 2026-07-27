@@ -156,7 +156,7 @@ void queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data,
 }
 
 bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
-    while (!client->outputQueue.empty()) {
+    while (!client->outputQueue.empty() && !client->clientState==CLIENT_AWAITING_USERNAME) {
         std::string &pending = client->outputQueue.front();
         ssize_t numBytes = send(client->fd, pending.data(), pending.size(), MSG_NOSIGNAL);
 
