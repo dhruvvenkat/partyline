@@ -2,6 +2,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cerrno>
+#include <deque>
 #include <string>
 #include <iostream>
 #include <netinet/in.h>
@@ -21,7 +23,17 @@
 
 #define PORT "1234"
 #define QUEUE_LENGTH 10
-#define MAX_DATA_SIZE 100
+#define MAX_DATA_SIZE 256
+
+struct ClientConnection {
+    int fd;
+    std::string username;
+    int currRoom;
+    char inputBuf[MAX_DATA_SIZE];
+    std::deque<std::string> outputQueue;
+    size_t outputQueueSize;
+    int clientState;
+};
 
 void signalHandler(int sig) {
     if (sig == 2) {
@@ -116,16 +128,63 @@ void addToPFDs(std::vector<struct pollfd> *pfds, int newfd) {
 
 }
 
+struct ClientConnection packClientStruct(int fd, std::string username) {
+    struct ClientConnection newConnection{};
+    newConnection.fd = fd;
+    newConnection.username = username;
+    newConnection.currRoom = 0;
+    newConnection.outputQueueSize = 0;
+    newConnection.clientState = 0;
+
+    return newConnection;
+}
+
 void removePFD(std::vector<struct pollfd> *pfds, int i) {
     (*pfds)[i] = pfds->back();
     pfds->pop_back();
 }
 
-void handleConnection(int listener, std::vector<struct pollfd> *pfds) {
+void queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
+    client->outputQueue.emplace_back(data, numBytes);
+    client->outputQueueSize += numBytes;
+    pfd->events |= POLLOUT;
+}
+
+bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
+    while (!client->outputQueue.empty()) {
+        std::string &pending = client->outputQueue.front();
+        ssize_t numBytes = send(client->fd, pending.data(), pending.size(), MSG_NOSIGNAL);
+
+        if (numBytes > 0) {
+            pending.erase(0, numBytes);
+            client->outputQueueSize -= numBytes;
+
+            if (pending.empty()) {
+                client->outputQueue.pop_front();
+            }
+        } else if (numBytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            break;
+        } else {
+            perror("send");
+            return false;
+        }
+    }
+
+    if (client->outputQueue.empty()) {
+        pfd->events &= ~POLLOUT;
+    }
+
+    return true;
+}
+
+void handleConnection(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients) {
     struct sockaddr_storage incomingAddr;
     socklen_t addrlen;
     int incomingfd;
     char remoteIP[INET6_ADDRSTRLEN];
+    int numBytes;
+
+    char newClientUsername[MAX_DATA_SIZE];
 
     addrlen = sizeof incomingAddr;
     incomingfd = accept(listener, (struct sockaddr *)&incomingAddr, &addrlen);
@@ -133,55 +192,119 @@ void handleConnection(int listener, std::vector<struct pollfd> *pfds) {
     if (incomingfd == -1) {
         perror("accept");
     } else {
-        addToPFDs(pfds, incomingfd);
+        if (send(incomingfd, "enter your username: ", 22, 0) == -1) {
+            perror("server: username prompt did not work");
+        }
 
-        std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << std::endl;
+        if ((numBytes = recv(incomingfd, newClientUsername, sizeof newClientUsername, 0)) <= 0) {
+            if (numBytes == -1) {
+                perror("server: username not receieved");
+            }
+            close(incomingfd);
+            return;
+        }
+
+        std::string username(newClientUsername, numBytes);
+        while (!username.empty() && (username.back() == '\n' || username.back() == '\r')) {
+            username.pop_back();
+        }
+        // for (const auto &[desc, client] : clients) {
+        //     if (client.username == newClientUsername) {
+        //         std::cerr << "server: user already exists";
+        //     }
+        // }
+
+        addToPFDs(pfds, incomingfd);
+        struct ClientConnection newClient = packClientStruct(incomingfd, username);
+
+
+        clients->insert({incomingfd, newClient});
+
+        std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << " with username " << username << std::endl;
+
+        std::cout << "\n+------+----------------+\n";
+        std::cout << "| FD   | Username       |\n";
+        std::cout << "+------+----------------+\n";
+
+        for (const auto& [fd, client] : *clients) {
+            std::cout << "| " << fd << "\t| " << client.username << '\n';
+        }
+
+        std::cout << "+------+----------------+\n";
     }
 }
 
-void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i) {
-    char buf[256];
-    int numBytes = recv((*pfds)[*pfd_i].fd, buf, sizeof buf, 0);
-
+void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, struct ClientConnection> *clients) {
     int senderfd = (*pfds)[*pfd_i].fd;
+
+    struct ClientConnection *clientSender;
+    try {
+        clientSender = &clients->at(senderfd);
+    } catch (std::out_of_range) {
+        std::cerr << "server: sending client not found" << std::endl;
+        return;
+    }
+
+    int numBytes = recv(senderfd, clientSender->inputBuf, sizeof clientSender->inputBuf, 0);
 
     if (numBytes <= 0) {
         if (numBytes == 0) {
-            std::cout << "pollserver: socket " << senderfd << " hung up" << std::endl;
+            std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
         } else {
             perror("recv");
         }
 
         close((*pfds)[*pfd_i].fd);
         removePFD(pfds, *pfd_i);
+        clients->erase(senderfd);
 
         (*pfd_i)--;
     } else {
         std::cout << "> pollserver: recv from fd " << senderfd << ": ";
-        std::cout.write(buf, numBytes);
+        std::cout.write(clientSender->inputBuf, numBytes);
         std::cout << std::endl;
 
         for (int j = 0; j < (int)pfds->size(); j++) {
             int destfd = (*pfds)[j].fd;
 
             if (destfd != listener && destfd != senderfd) {
-                if (send(destfd, buf, numBytes, 0) == -1) {
-                    perror("send");
+                auto destClient = clients->find(destfd);
+                if (destClient != clients->end()) {
+                    queueOutput(&(*pfds)[j], &destClient->second, clientSender->inputBuf, numBytes);
                 }
             }
         }
     }
 }
 
-void processExistingConnections(int listener, std::vector<struct pollfd> *pfds) {
+void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients) {
     for (int i = 0; i < (int)pfds->size(); i++) {
-        if ((*pfds)[i].revents & (POLLIN | POLLHUP)) {
-            if ((*pfds)[i].fd == listener) {
-                handleConnection(listener, pfds);
-            } else {
-                handleClients(listener, pfds, &i);
-            }
+        short revents = (*pfds)[i].revents;
+        int fd = (*pfds)[i].fd;
 
+        if (fd == listener) {
+            if (revents & POLLIN) {
+                handleConnection(listener, pfds, clients);
+            }
+            continue;
+        }
+
+        if (revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
+            handleClients(listener, pfds, &i, clients);
+
+            if (i < 0 || i >= (int)pfds->size() || (*pfds)[i].fd != fd) {
+                continue;
+            }
+        }
+
+        if (revents & POLLOUT) {
+            auto client = clients->find(fd);
+            if (client != clients->end() && !flushOutput(&(*pfds)[i], &client->second)) {
+                close(fd);
+                removePFD(pfds, i);
+                clients->erase(fd);
+                i--;
+            }
         }
     }
 }
@@ -191,8 +314,8 @@ int main(void) {
 
     int listener;
 
+    std::unordered_map<int, struct ClientConnection> clients;
     std::vector<struct pollfd> pfds;
-
 
     // generate a listener and add that as the first pollfd entry
     listener = getListenerSocket();
@@ -213,6 +336,6 @@ int main(void) {
             exit(1);
         }
 
-        processExistingConnections(listener, &pfds);
+        processExistingConnections(listener, &pfds, &clients);
     }
 }
