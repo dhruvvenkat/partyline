@@ -1,46 +1,20 @@
-#include <asm-generic/socket.h>
+#include "server.hpp"
+
+#include <arpa/inet.h>
+#include <cerrno>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
-#include <cerrno>
-#include <deque>
-#include <string>
+#include <fcntl.h>
 #include <iostream>
 #include <netinet/in.h>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <netdb.h>
-#include <unordered_map>
-#include <vector>
-#include <sstream>
-#include <cctype>
-#include <csignal>
-#include <poll.h>
-#include <fcntl.h>
-
-#define PORT "1234"
-#define QUEUE_LENGTH 10
-#define MAX_DATA_SIZE 256
-
-constexpr int CLIENT_AWAITING_USERNAME = 0;
-constexpr int CLIENT_ACTIVE = 1;
-
-struct ClientConnection {
-    int fd;
-    std::string username;
-    int currRoom;
-    char inputBuf[MAX_DATA_SIZE];
-    std::deque<std::string> outputQueue;
-    size_t outputQueueSize;
-    int clientState;
-};
 
 void signalHandler(int sig) {
-    if (sig == 2) {
+    if (sig == SIGINT) {
         std::cout << "\npollserver interrupted, shutting down..." << std::endl;
         exit(sig);
     }
@@ -49,92 +23,8 @@ void signalHandler(int sig) {
     exit(sig);
 }
 
-const char *inet_ntop2(void *addr, char *buf, size_t size) {
-
-    struct sockaddr_storage *sas = static_cast<sockaddr_storage *>(addr);
-    struct sockaddr_in *sa4;
-    struct sockaddr_in6 *sa6;
-    void *src;
-
-    switch (sas->ss_family) {
-        case AF_INET:
-            sa4 = static_cast<sockaddr_in *>(addr);
-            src = &(sa4->sin_addr);
-            break;
-
-        case AF_INET6:
-            sa6 = static_cast<sockaddr_in6 *>(addr);
-            src = &(sa6->sin6_addr);
-            break;
-
-        default:
-            return NULL;
-    }
-
-    return inet_ntop(sas->ss_family, src, buf, size);
-}
-
-int getListenerSocket(void) {
-    int listener;
-    int yes=1;
-    int rv;
-
-    struct addrinfo hints, *ai, *p;
-
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE;
-
-    if((rv = getaddrinfo(NULL, PORT, &hints, &ai)) != 0) {
-        std::cerr << "pollserver: " << gai_strerror(rv) << std::endl;
-        exit(1);
-    }
-
-    for (p = ai; p != NULL; p = p->ai_next) {
-        listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-        fcntl(listener, F_SETFL, O_NONBLOCK);
-
-        if(listener < 0) {
-            continue;
-        }
-
-        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
-
-        if(bind(listener, p->ai_addr, p->ai_addrlen)) {
-            close(listener);
-            continue;
-        }
-
-        break;
-    }
-
-    if (p == NULL) {
-        return -1;
-    }
-
-    freeaddrinfo(ai);
-
-    if(listen(listener, 10) == -1) {
-        return -1;
-    }
-
-    return listener;
-}
-
-void addToPFDs(std::vector<struct pollfd> *pfds, int newfd) {
-
-    struct pollfd newpfd;
-    newpfd.fd = newfd;
-    newpfd.events = POLLIN;
-    newpfd.revents = 0;
-
-    pfds->push_back(newpfd);
-
-}
-
-struct ClientConnection packClientStruct(int fd, std::string username) {
-    struct ClientConnection newConnection{};
+ClientConnection packClientStruct(int fd, std::string username) {
+    ClientConnection newConnection{};
     newConnection.fd = fd;
     newConnection.username = username;
     newConnection.currRoom = 0;
@@ -144,51 +34,11 @@ struct ClientConnection packClientStruct(int fd, std::string username) {
     return newConnection;
 }
 
-void removePFD(std::vector<struct pollfd> *pfds, int i) {
-    (*pfds)[i] = pfds->back();
-    pfds->pop_back();
-}
-
-void queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
-    client->outputQueue.emplace_back(data, numBytes);
-    client->outputQueueSize += numBytes;
-    pfd->events |= POLLOUT;
-}
-
-bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
-    while (!client->outputQueue.empty() && !client->clientState==CLIENT_AWAITING_USERNAME) {
-        std::string &pending = client->outputQueue.front();
-        ssize_t numBytes = send(client->fd, pending.data(), pending.size(), MSG_NOSIGNAL);
-
-        if (numBytes > 0) {
-            pending.erase(0, numBytes);
-            client->outputQueueSize -= numBytes;
-
-            if (pending.empty()) {
-                client->outputQueue.pop_front();
-            }
-        } else if (numBytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            break;
-        } else {
-            perror("send");
-            return false;
-        }
-    }
-
-    if (client->outputQueue.empty()) {
-        pfd->events &= ~POLLOUT;
-    }
-
-    return true;
-}
-
 void handleConnection(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients) {
     struct sockaddr_storage incomingAddr;
-    socklen_t addrlen;
-    int incomingfd;
+    socklen_t addrlen = sizeof incomingAddr;
+    int incomingfd = accept(listener, (struct sockaddr *)&incomingAddr, &addrlen);
     char remoteIP[INET6_ADDRSTRLEN];
-    addrlen = sizeof incomingAddr;
-    incomingfd = accept(listener, (struct sockaddr *)&incomingAddr, &addrlen);
 
     if (incomingfd == -1) {
         if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -215,10 +65,10 @@ void handleConnection(int listener, std::vector<struct pollfd> *pfds, std::unord
     std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << "; awaiting username" << std::endl;
 }
 
-void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, struct ClientConnection> *clients) {
+void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients) {
     int senderfd = (*pfds)[*pfd_i].fd;
 
-    struct ClientConnection *clientSender;
+    ClientConnection *clientSender;
     try {
         clientSender = &clients->at(senderfd);
     } catch (const std::out_of_range&) {
@@ -265,16 +115,10 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
     }
 
     if (numBytes == 0) {
-        if (numBytes == 0) {
-            std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
-        } else {
-            perror("recv");
-        }
-
-        close((*pfds)[*pfd_i].fd);
+        std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
+        close(senderfd);
         removePFD(pfds, *pfd_i);
         clients->erase(senderfd);
-
         (*pfd_i)--;
     } else if (numBytes > 0) {
         std::cout << "> pollserver: recv from fd " << senderfd << ": ";
@@ -284,17 +128,21 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         for (int j = 0; j < (int)pfds->size(); j++) {
             int destfd = (*pfds)[j].fd;
 
-            if (destfd != listener && destfd != senderfd) {
-                auto destClient = clients->find(destfd);
-                if (destClient != clients->end()) {
-                    queueOutput(&(*pfds)[j], &destClient->second, clientSender->inputBuf, numBytes);
-                }
+            if (destfd == listener || destfd == senderfd) {
+                continue;
+            }
+
+            auto destClient = clients->find(destfd);
+            if (destClient != clients->end() && destClient->second.clientState == CLIENT_ACTIVE) {
+                queueOutput(&(*pfds)[j], &destClient->second, clientSender->inputBuf, numBytes);
             }
         }
-    } else if (numBytes < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-        std::cout << "> pollserver: no data is available yet" << std::endl;
-    } else {
+    } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
         perror("recv");
+        close(senderfd);
+        removePFD(pfds, *pfd_i);
+        clients->erase(senderfd);
+        (*pfd_i)--;
     }
 }
 
@@ -333,19 +181,14 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
 int main(void) {
     signal(SIGINT, signalHandler);
 
-    int listener;
-
-    std::unordered_map<int, struct ClientConnection> clients;
-    std::vector<struct pollfd> pfds;
-
-    // generate a listener and add that as the first pollfd entry
-    listener = getListenerSocket();
-    pfds.push_back({listener, POLLIN, 0});
-
+    int listener = getListenerSocket();
     if (listener == -1) {
         std::cerr << "error getting listening socket" << std::endl;
         exit(1);
     }
+
+    std::unordered_map<int, ClientConnection> clients;
+    std::vector<struct pollfd> pfds{{listener, POLLIN, 0}};
 
     puts("pollserver: waiting for connections...");
 
