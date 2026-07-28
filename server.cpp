@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -16,7 +17,7 @@
 #include <unordered_set>
 #include <cstring>
 
-static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "MSG", "QUIT"};
+static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "MSG", "QUIT", "WHERE"};
 
 bool isReservedKeyword(std::string_view cmd) {
     return reservedKeywords.find(std::string(cmd)) != reservedKeywords.end();
@@ -31,6 +32,14 @@ void tokenizeBySpaces(const std::string &input, std::vector<std::string> &tokens
 	}
 
 	return;
+}
+
+static void removeClientFromRooms(int clientFd, std::vector<ChatRoom> &chatRooms) {
+    for (auto &room : chatRooms) {
+        room.subscribedClients.erase(
+            std::remove(room.subscribedClients.begin(), room.subscribedClients.end(), clientFd),
+            room.subscribedClients.end());
+    }
 }
 
 void signalHandler(int sig) {
@@ -107,6 +116,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
             clientSender->username = username;
             clientSender->clientState = CLIENT_ACTIVE;
+            joinChatRoom(clientSender, "main-room", *chatRooms);
 
             std::cout << "pollserver: user " << username << " connected on socket " << senderfd << std::endl;
             std::cout << "\n+------+----------------+\n";
@@ -136,6 +146,9 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
     if (numBytes == 0) {
         std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
+        int oldRoomIdx = clientSender->currRoom;
+        removeClientFromRooms(senderfd, *chatRooms);
+        checkDeleteChatRoom(oldRoomIdx, *chatRooms);
         close(senderfd);
         removePFD(pfds, *pfd_i);
         clients->erase(senderfd);
@@ -155,58 +168,76 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                 return;
             } else if (tokens[0] == "JOIN" && tokens.size() == 2) {
                 std::cout << "join picked" << std::endl;
-                joinChatRoom(clientSender, std::stoi(tokens[1]));
+                int oldRoomIdx = clientSender->currRoom;
+                joinChatRoom(clientSender, tokens[1], *chatRooms);
+                checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
             } else if (tokens[0] == "LEAVE" && clientSender->currRoom != 0) {
                 std::cout << "leave picked" << std::endl;
-                joinChatRoom(clientSender, 0);
+                int oldRoomIdx = clientSender->currRoom;
+                joinChatRoom(clientSender, "main-room", *chatRooms);
+                checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
-            } else if (tokens[0] == "MSG" && tokens.size() > 1) {
-                std::cout << "msg picked" << std::endl;
-                std::string formattedOutboundMsg = "> " + clientSender->username + ": ";
 
-                for (int i = 1; i < (int)tokens.size(); i++) {
-                    formattedOutboundMsg.append(tokens[i]);
-                    formattedOutboundMsg.append(" ");
+            } else if (tokens[0] == "WHERE" && tokens.size() == 1) {
+                auto userRoom = std::find_if(chatRooms->begin(), chatRooms->end(), [&](const ChatRoom &room) {
+                    return room.roomIdx == clientSender->currRoom;
+                });
+
+                if (userRoom == chatRooms->end()) {
+                    std::string output = "> server: room not found\n";
+                    queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size());
+                    return;
                 }
 
-                std::cout << formattedOutboundMsg;
-                if (formattedOutboundMsg.back() != '\n') {
-                    formattedOutboundMsg.append("\n");
-                    std::cout << '\n';
-                }
+                std::string output = "> server: you are in room ";
+                output.append(userRoom->roomName);
+                output.append("\n");
 
-                for (int j = 0; j < (int)pfds->size(); j++) {
-                    int destfd = (*pfds)[j].fd;
-
-                    if (destfd == listener || destfd == senderfd) {
-                        continue;
-                    }
-
-                    auto destClient = clients->find(destfd);
-                    if (*(&destClient->second.currRoom) != clientSender->currRoom) {
-                        continue;
-                    }
-
-                    if (destClient != clients->end() && destClient->second.clientState == CLIENT_ACTIVE) {
-                        queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size());
-                    }
-                }
+                queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size());
 
             } else {
-                std::string errMsg = "ERROR: your message did not conform to standards!\n";
-                queueOutput(&(*pfds)[*pfd_i], clientSender, errMsg.data(), errMsg.size());
+
             }
 
         } else {
-            std::string errMsg = "ERROR: you must prefix your message with LIST, JOIN, MSG, or LEAVE\n";
-            queueOutput(&(*pfds)[*pfd_i], clientSender, errMsg.data(), errMsg.size());
+            std::cout << "msg picked" << std::endl;
+            std::string formattedOutboundMsg = "> " + clientSender->username + ": ";
+
+            for (int i = 0; i < (int)tokens.size(); i++) {
+                formattedOutboundMsg.append(tokens[i]);
+                formattedOutboundMsg.append(" ");
+            }
+
+            std::cout << formattedOutboundMsg;
+            if (formattedOutboundMsg.back() != '\n') {
+                formattedOutboundMsg.append("\n");
+                std::cout << '\n';
+            }
+
+            for (int j = 0; j < (int)pfds->size(); j++) {
+                int destfd = (*pfds)[j].fd;
+
+                if (destfd == listener || destfd == senderfd) {
+                    continue;
+                }
+
+                auto destClient = clients->find(destfd);
+                if (destClient == clients->end() || destClient->second.clientState != CLIENT_ACTIVE || destClient->second.currRoom != clientSender->currRoom) {
+                    continue;
+                }
+
+                queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size());
+            }
 
         }
 
 
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
         perror("recv");
+        int oldRoomIdx = clientSender->currRoom;
+        removeClientFromRooms(senderfd, *chatRooms);
+        checkDeleteChatRoom(oldRoomIdx, *chatRooms);
         close(senderfd);
         removePFD(pfds, *pfd_i);
         clients->erase(senderfd);
@@ -237,6 +268,9 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
         if (revents & POLLOUT) {
             auto client = clients->find(fd);
             if (client != clients->end() && !flushOutput(&(*pfds)[i], &client->second)) {
+                int oldRoomIdx = client->second.currRoom;
+                removeClientFromRooms(fd, *chatRooms);
+                checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 close(fd);
                 removePFD(pfds, i);
                 clients->erase(fd);
@@ -248,7 +282,10 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
 
 void createChatRoom(std::string roomName, std::vector<struct ChatRoom> *listOfRooms) {
     struct ChatRoom newRoom;
-    newRoom.roomIdx = listOfRooms->size();
+    newRoom.roomIdx = 0;
+    for (const auto &room : *listOfRooms) {
+        newRoom.roomIdx = std::max(newRoom.roomIdx, room.roomIdx + 1);
+    }
     newRoom.roomName = roomName;
 
     listOfRooms->push_back(newRoom);
@@ -263,8 +300,33 @@ void listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vect
     queueOutput(pfd, client, roomList.data(), roomList.size());
 }
 
-void joinChatRoom(struct ClientConnection *client, int roomToJoin) {
-    client->currRoom = roomToJoin;
+void joinChatRoom(struct ClientConnection *client, std::string roomToJoin, std::vector<ChatRoom> &chatRooms) {
+    ChatRoom *targetRoom = nullptr;
+    for (auto &room : chatRooms) {
+        if (room.roomName == roomToJoin) {
+            targetRoom = &room;
+            break;
+        }
+    }
+
+    if (targetRoom == nullptr) {
+        createChatRoom(roomToJoin, &chatRooms);
+        targetRoom = &chatRooms.back();
+    }
+
+    removeClientFromRooms(client->fd, chatRooms);
+    targetRoom->subscribedClients.push_back(client->fd);
+    client->currRoom = targetRoom->roomIdx;
+}
+
+void checkDeleteChatRoom(int roomIdToDelete, std::vector<ChatRoom> &chatRooms) {
+    auto room = std::find_if(chatRooms.begin(), chatRooms.end(), [&](const ChatRoom &candidate) {
+        return candidate.roomIdx == roomIdToDelete;
+    });
+
+    if (room != chatRooms.end() && room->roomName != "main-room" && room->subscribedClients.empty()) {
+        chatRooms.erase(room);
+    }
 }
 
 

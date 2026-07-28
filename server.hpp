@@ -48,5 +48,6 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
 void processCommand(std::string command);
 
 void createChatRoom(std::string roomName, std::vector<struct ChatRoom> *listOfRooms);
-void joinChatRoom(struct ClientConnection *client, int roomToJoin);
+void joinChatRoom(struct ClientConnection *client, std::string roomToJoin, std::vector<ChatRoom> &chatRooms);
 void listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms);
+void checkDeleteChatRoom(int roomIdToDelete, std::vector<ChatRoom> &chatRooms);
