@@ -99,10 +99,25 @@ void removePFD(std::vector<struct pollfd> *pfds, int i) {
     pfds->pop_back();
 }
 
-void queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
-    client->outputQueue.emplace_back(data, numBytes);
-    client->outputQueueSize += numBytes;
-    pfd->events |= POLLOUT;
+void disconnectClient(std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients) {
+    int fd = (*pfds)[*pfd_i].fd;
+    close(fd);
+    removePFD(pfds, *pfd_i);
+    clients->erase(fd);
+    (*pfd_i)--;
+}
+
+bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
+    // Slow-client protection; if a client's output queue exceeds 512 bytes, the connection is stalled and we cut the connection
+    if ((client->outputQueueSize + numBytes) < OUTPUT_QUEUE_MAX) {
+        client->outputQueue.emplace_back(data, numBytes);
+        client->outputQueueSize += numBytes;
+        pfd->events |= POLLOUT;
+
+        return true;
+    }
+
+    return false;
 }
 
 bool flushOutput(struct pollfd *pfd, ClientConnection *client) {

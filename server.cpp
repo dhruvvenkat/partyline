@@ -63,7 +63,9 @@ static void notifyRoomMembers(int roomId, int excludedFd, const std::string &mes
             continue;
         }
 
-        queueOutput(&(*pfds)[i], &destClient->second, message.data(), message.size());
+        if(queueOutput(&(*pfds)[i], &destClient->second, message.data(), message.size()) == false) {
+            disconnectClient(pfds, &i, clients);
+        }
     }
 }
 
@@ -156,16 +158,10 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
             std::cout << "+------+----------------+\n";
         } else if (numBytes == 0) {
-            close(senderfd);
-            removePFD(pfds, *pfd_i);
-            clients->erase(senderfd);
-            (*pfd_i)--;
+            disconnectClient(pfds, pfd_i, clients);
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
             perror("recv username");
-            close(senderfd);
-            removePFD(pfds, *pfd_i);
-            clients->erase(senderfd);
-            (*pfd_i)--;
+            disconnectClient(pfds, pfd_i, clients);
         }
 
         return;
@@ -178,10 +174,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
         removeClientFromRooms(senderfd, *chatRooms);
         checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-        close(senderfd);
-        removePFD(pfds, *pfd_i);
-        clients->erase(senderfd);
-        (*pfd_i)--;
+        disconnectClient(pfds, pfd_i, clients);
     } else if (numBytes > 0) {
         std::string command(clientSender->inputBuf, numBytes);
         while (!command.empty() && (command.back() == '\n' || command.back() == '\r')) {
@@ -229,7 +222,9 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
                 if (userRoom == chatRooms->end()) {
                     std::string output = "> server: room not found\n";
-                    queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size());
+                    if (queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size()) == false) {
+                        disconnectClient(pfds, pfd_i, clients);
+                    }
                     return;
                 }
 
@@ -237,7 +232,10 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                 output.append(userRoom->roomName);
                 output.append("\n");
 
-                queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size());
+                if (queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size()) == false) {
+                    disconnectClient(pfds, pfd_i, clients);
+                }
+
 
             } else if (tokens[0] == "QUIT") {
                 int oldRoomIdx = clientSender->currRoom;
@@ -245,10 +243,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                 notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
                 removeClientFromRooms(senderfd, *chatRooms);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-                close(senderfd);
-                removePFD(pfds, *pfd_i);
-                clients->erase(senderfd);
-                (*pfd_i)--;
+                disconnectClient(pfds, pfd_i, clients);
                 return;
             }
 
@@ -279,7 +274,9 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                     continue;
                 }
 
-                queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size());
+                if (queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size()) == false) {
+                    disconnectClient(pfds, pfd_i, clients);
+                }
             }
 
         }
@@ -292,10 +289,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
         removeClientFromRooms(senderfd, *chatRooms);
         checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-        close(senderfd);
-        removePFD(pfds, *pfd_i);
-        clients->erase(senderfd);
-        (*pfd_i)--;
+        disconnectClient(pfds, pfd_i, clients);
     }
 }
 
@@ -327,10 +321,7 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
                 notifyRoomMembers(oldRoomIdx, fd, leftMessage, listener, pfds, clients);
                 removeClientFromRooms(fd, *chatRooms);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-                close(fd);
-                removePFD(pfds, i);
-                clients->erase(fd);
-                i--;
+                disconnectClient(pfds, &i, clients);
             }
         }
     }
@@ -353,7 +344,12 @@ void listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vect
         roomList += "| " + std::to_string(room.roomIdx) + "\t| " + room.roomName + "\n";
     }
     roomList += "+------+----------------+\n";
-    queueOutput(pfd, client, roomList.data(), roomList.size());
+
+    if (queueOutput(pfd, client, roomList.data(), roomList.size()) == false) {
+        close(client->fd);
+        //disconnectClient(pfds, pfd_i, clients);
+    }
+
 }
 
 void joinChatRoom(struct ClientConnection *client, std::string roomToJoin, std::vector<ChatRoom> &chatRooms) {
