@@ -42,6 +42,31 @@ static void removeClientFromRooms(int clientFd, std::vector<ChatRoom> &chatRooms
     }
 }
 
+static std::string roomNameForId(int roomId, const std::vector<ChatRoom> &chatRooms) {
+    for (const auto &room : chatRooms) {
+        if (room.roomIdx == roomId) {
+            return room.roomName;
+        }
+    }
+    return {};
+}
+
+static void notifyRoomMembers(int roomId, int excludedFd, const std::string &message, int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients) {
+    for (int i = 0; i < (int)pfds->size(); i++) {
+        int destfd = (*pfds)[i].fd;
+        if (destfd == listener || destfd == excludedFd) {
+            continue;
+        }
+
+        auto destClient = clients->find(destfd);
+        if (destClient == clients->end() || destClient->second.clientState != CLIENT_ACTIVE || destClient->second.currRoom != roomId) {
+            continue;
+        }
+
+        queueOutput(&(*pfds)[i], &destClient->second, message.data(), message.size());
+    }
+}
+
 void signalHandler(int sig) {
     if (sig == SIGINT) {
         std::cout << "\npollserver interrupted, shutting down..." << std::endl;
@@ -117,6 +142,8 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
             clientSender->username = username;
             clientSender->clientState = CLIENT_ACTIVE;
             joinChatRoom(clientSender, "main-room", *chatRooms);
+            std::string joinedMessage = "> server: " + username + " joined room main-room\n";
+            notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, listener, pfds, clients);
 
             std::cout << "pollserver: user " << username << " connected on socket " << senderfd << std::endl;
             std::cout << "\n+------+----------------+\n";
@@ -147,6 +174,8 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
     if (numBytes == 0) {
         std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
         int oldRoomIdx = clientSender->currRoom;
+        std::string leftMessage = "> server: " + clientSender->username + " disconnected\n";
+        notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
         removeClientFromRooms(senderfd, *chatRooms);
         checkDeleteChatRoom(oldRoomIdx, *chatRooms);
         close(senderfd);
@@ -169,13 +198,27 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
             } else if (tokens[0] == "JOIN" && tokens.size() == 2) {
                 std::cout << "join picked" << std::endl;
                 int oldRoomIdx = clientSender->currRoom;
+                std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
+                if (oldRoomName != tokens[1]) {
+                    std::string leftMessage = "> server: " + clientSender->username + " left room " + oldRoomName + "\n";
+                    notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
+                }
                 joinChatRoom(clientSender, tokens[1], *chatRooms);
+                if (oldRoomName != tokens[1]) {
+                    std::string joinedMessage = "> server: " + clientSender->username + " joined room " + tokens[1] + "\n";
+                    notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, listener, pfds, clients);
+                }
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
             } else if (tokens[0] == "LEAVE" && clientSender->currRoom != 0) {
                 std::cout << "leave picked" << std::endl;
                 int oldRoomIdx = clientSender->currRoom;
+                std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
+                std::string leftMessage = "> server: " + clientSender->username + " left room " + oldRoomName + "\n";
+                notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
                 joinChatRoom(clientSender, "main-room", *chatRooms);
+                std::string joinedMessage = "> server: " + clientSender->username + " joined room main-room\n";
+                notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, listener, pfds, clients);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
 
@@ -196,8 +239,17 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
                 queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size());
 
-            } else {
-
+            } else if (tokens[0] == "QUIT") {
+                int oldRoomIdx = clientSender->currRoom;
+                std::string leftMessage = "> server: " + clientSender->username + " has disconnected\n";
+                notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
+                removeClientFromRooms(senderfd, *chatRooms);
+                checkDeleteChatRoom(oldRoomIdx, *chatRooms);
+                close(senderfd);
+                removePFD(pfds, *pfd_i);
+                clients->erase(senderfd);
+                (*pfd_i)--;
+                return;
             }
 
         } else {
@@ -236,6 +288,8 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
         perror("recv");
         int oldRoomIdx = clientSender->currRoom;
+        std::string leftMessage = "> server: " + clientSender->username + " disconnected\n";
+        notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients);
         removeClientFromRooms(senderfd, *chatRooms);
         checkDeleteChatRoom(oldRoomIdx, *chatRooms);
         close(senderfd);
@@ -269,6 +323,8 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
             auto client = clients->find(fd);
             if (client != clients->end() && !flushOutput(&(*pfds)[i], &client->second)) {
                 int oldRoomIdx = client->second.currRoom;
+                std::string leftMessage = "> server: " + client->second.username + " disconnected\n";
+                notifyRoomMembers(oldRoomIdx, fd, leftMessage, listener, pfds, clients);
                 removeClientFromRooms(fd, *chatRooms);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 close(fd);
