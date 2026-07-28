@@ -14,6 +14,7 @@
 #include <unistd.h>
 #include <sstream>
 #include <unordered_set>
+#include <cstring>
 
 static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "MSG", "QUIT"};
 
@@ -149,33 +150,61 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         tokenizeBySpaces(command, tokens);
         if (!tokens.empty() && isReservedKeyword(tokens[0])) {
             if (tokens[0] == "LIST") {
+                std::cout << "list picked" << std::endl;
                 listChatRooms(&(*pfds)[*pfd_i], clientSender, *chatRooms);
                 return;
-            } else if (tokens[0] == "JOIN" && tokens.size() > 1) {
+            } else if (tokens[0] == "JOIN" && tokens.size() == 2) {
+                std::cout << "join picked" << std::endl;
                 joinChatRoom(clientSender, std::stoi(tokens[1]));
+
+            } else if (tokens[0] == "LEAVE" && clientSender->currRoom != 0) {
+                std::cout << "leave picked" << std::endl;
+                joinChatRoom(clientSender, 0);
+
+            } else if (tokens[0] == "MSG" && tokens.size() > 1) {
+                std::cout << "msg picked" << std::endl;
+                std::string formattedOutboundMsg = "> " + clientSender->username + ": ";
+
+                for (int i = 1; i < (int)tokens.size(); i++) {
+                    formattedOutboundMsg.append(tokens[i]);
+                    formattedOutboundMsg.append(" ");
+                }
+
+                std::cout << formattedOutboundMsg;
+                if (formattedOutboundMsg.back() != '\n') {
+                    formattedOutboundMsg.append("\n");
+                    std::cout << '\n';
+                }
+
+                for (int j = 0; j < (int)pfds->size(); j++) {
+                    int destfd = (*pfds)[j].fd;
+
+                    if (destfd == listener || destfd == senderfd) {
+                        continue;
+                    }
+
+                    auto destClient = clients->find(destfd);
+                    if (*(&destClient->second.currRoom) != clientSender->currRoom) {
+                        continue;
+                    }
+
+                    if (destClient != clients->end() && destClient->second.clientState == CLIENT_ACTIVE) {
+                        queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size());
+                    }
+                }
+
+            } else {
+                std::string errMsg = "ERROR: your message did not conform to standards!\n";
+                queueOutput(&(*pfds)[*pfd_i], clientSender, errMsg.data(), errMsg.size());
             }
+
+        } else {
+            std::string errMsg = "ERROR: you must prefix your message with LIST, JOIN, MSG, or LEAVE\n";
+            queueOutput(&(*pfds)[*pfd_i], clientSender, errMsg.data(), errMsg.size());
+
         }
 
-        std::string formattedOutboundMsg = "> " + clientSender->username + ": ";
-        formattedOutboundMsg.append(clientSender->inputBuf, numBytes);
 
-        std::cout << formattedOutboundMsg;
-        if (formattedOutboundMsg.back() != '\n') {
-            std::cout << '\n';
-        }
-
-        for (int j = 0; j < (int)pfds->size(); j++) {
-            int destfd = (*pfds)[j].fd;
-
-            if (destfd == listener || destfd == senderfd) {
-                continue;
-            }
-
-            auto destClient = clients->find(destfd);
-            if (destClient != clients->end() && destClient->second.clientState == CLIENT_ACTIVE) {
-                queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size());
-            }
-        }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
         perror("recv");
         close(senderfd);
