@@ -12,6 +12,25 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
+#include <sstream>
+#include <unordered_set>
+
+static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "MSG", "QUIT"};
+
+bool isReservedKeyword(std::string_view cmd) {
+    return reservedKeywords.find(std::string(cmd)) != reservedKeywords.end();
+}
+
+void tokenizeBySpaces(const std::string &input, std::vector<std::string> &tokens) {
+	std::istringstream iss(input);
+	std::string buf;
+
+	while (getline(iss, buf, ' ')) {
+		tokens.push_back(buf);
+	}
+
+	return;
+}
 
 void signalHandler(int sig) {
     if (sig == SIGINT) {
@@ -65,7 +84,7 @@ void handleConnection(int listener, std::vector<struct pollfd> *pfds, std::unord
     std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << "; awaiting username" << std::endl;
 }
 
-void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients) {
+void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms) {
     int senderfd = (*pfds)[*pfd_i].fd;
 
     ClientConnection *clientSender;
@@ -121,9 +140,29 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         clients->erase(senderfd);
         (*pfd_i)--;
     } else if (numBytes > 0) {
-        std::cout << "> pollserver: recv from fd " << senderfd << ": ";
-        std::cout.write(clientSender->inputBuf, numBytes);
-        std::cout << std::endl;
+        std::string command(clientSender->inputBuf, numBytes);
+        while (!command.empty() && (command.back() == '\n' || command.back() == '\r')) {
+            command.pop_back();
+        }
+
+        std::vector<std::string> tokens;
+        tokenizeBySpaces(command, tokens);
+        if (!tokens.empty() && isReservedKeyword(tokens[0])) {
+            if (tokens[0] == "LIST") {
+                listChatRooms(&(*pfds)[*pfd_i], clientSender, *chatRooms);
+                return;
+            } else if (tokens[0] == "JOIN" && tokens.size() > 1) {
+                joinChatRoom(clientSender, std::stoi(tokens[1]));
+            }
+        }
+
+        std::string formattedOutboundMsg = "> " + clientSender->username + ": ";
+        formattedOutboundMsg.append(clientSender->inputBuf, numBytes);
+
+        std::cout << formattedOutboundMsg;
+        if (formattedOutboundMsg.back() != '\n') {
+            std::cout << '\n';
+        }
 
         for (int j = 0; j < (int)pfds->size(); j++) {
             int destfd = (*pfds)[j].fd;
@@ -134,7 +173,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
             auto destClient = clients->find(destfd);
             if (destClient != clients->end() && destClient->second.clientState == CLIENT_ACTIVE) {
-                queueOutput(&(*pfds)[j], &destClient->second, clientSender->inputBuf, numBytes);
+                queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size());
             }
         }
     } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
@@ -146,7 +185,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
     }
 }
 
-void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients) {
+void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms) {
     for (int i = 0; i < (int)pfds->size(); i++) {
         short revents = (*pfds)[i].revents;
         int fd = (*pfds)[i].fd;
@@ -159,7 +198,7 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
         }
 
         if (revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
-            handleClients(listener, pfds, &i, clients);
+            handleClients(listener, pfds, &i, clients, chatRooms);
 
             if (i < 0 || i >= (int)pfds->size() || (*pfds)[i].fd != fd) {
                 continue;
@@ -178,6 +217,28 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
     }
 }
 
+void createChatRoom(std::string roomName, std::vector<struct ChatRoom> *listOfRooms) {
+    struct ChatRoom newRoom;
+    newRoom.roomIdx = listOfRooms->size();
+    newRoom.roomName = roomName;
+
+    listOfRooms->push_back(newRoom);
+}
+
+void listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms) {
+    std::string roomList = "+------+----------------+\n| ID   | Room           |\n+------+----------------+\n";
+    for (const auto &room : chatRooms) {
+        roomList += "| " + std::to_string(room.roomIdx) + "\t| " + room.roomName + "\n";
+    }
+    roomList += "+------+----------------+\n";
+    queueOutput(pfd, client, roomList.data(), roomList.size());
+}
+
+void joinChatRoom(struct ClientConnection *client, int roomToJoin) {
+    client->currRoom = roomToJoin;
+}
+
+
 int main(void) {
     signal(SIGINT, signalHandler);
 
@@ -189,6 +250,10 @@ int main(void) {
 
     std::unordered_map<int, ClientConnection> clients;
     std::vector<struct pollfd> pfds{{listener, POLLIN, 0}};
+    std::vector<struct ChatRoom> chatRooms;
+
+    createChatRoom("main-room", &chatRooms);
+    createChatRoom("test-room", &chatRooms);
 
     puts("pollserver: waiting for connections...");
 
@@ -200,6 +265,6 @@ int main(void) {
             exit(1);
         }
 
-        processExistingConnections(listener, &pfds, &clients);
+        processExistingConnections(listener, &pfds, &clients, &chatRooms);
     }
 }
