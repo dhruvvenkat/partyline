@@ -51,6 +51,24 @@ static std::string roomNameForId(int roomId, const std::vector<ChatRoom> &chatRo
     return {};
 }
 
+static bool rateLimitExceeded(ClientConnection *client, size_t frameBytes) {
+    auto now = std::chrono::steady_clock::now();
+    if (now - client->rateWindowStart >= std::chrono::seconds(1)) {
+        client->rateWindowStart = now;
+        client->rateWindowFrames = 0;
+        client->rateWindowBytes = 0;
+    }
+
+    if (client->rateWindowFrames >= RATE_LIMIT_FRAMES_PER_SECOND ||
+        client->rateWindowBytes + frameBytes > RATE_LIMIT_BYTES_PER_SECOND) {
+        return true;
+    }
+
+    client->rateWindowFrames++;
+    client->rateWindowBytes += frameBytes;
+    return false;
+}
+
 static void notifyRoomMembers(int roomId, int excludedFd, const std::string &message, int listener, std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, std::vector<struct ChatRoom> chatRooms) {
     for (int i = 0; i < (int)pfds->size(); i++) {
         int destfd = (*pfds)[i].fd;
@@ -89,6 +107,9 @@ ClientConnection packClientStruct(int fd, std::string username) {
     newConnection.currRoom = 0;
     newConnection.outputQueueSize = 0;
     newConnection.clientState = username.empty() ? CLIENT_AWAITING_USERNAME : CLIENT_ACTIVE;
+    newConnection.rateWindowStart = std::chrono::steady_clock::now();
+    newConnection.rateWindowFrames = 0;
+    newConnection.rateWindowBytes = 0;
 
     return newConnection;
 }
@@ -277,6 +298,15 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
                     std::cout << "pollserver: user " << clientSender->username << " connected on socket " << senderfd << std::endl;
                     continue;
+                }
+
+                if (!frame.empty() && rateLimitExceeded(clientSender, frame.size())) {
+                    std::cerr << "server: rate limit exceeded for fd " << senderfd << std::endl;
+                    int oldRoomIdx = clientSender->currRoom;
+                    removeClientFromRooms(senderfd, *chatRooms);
+                    checkDeleteChatRoom(oldRoomIdx, *chatRooms);
+                    disconnectClient(pfds, pfd_i, clients, senderfd, "sender rate limit exceeded");
+                    return;
                 }
 
                 if (!processCommandFrame(listener, pfds, pfd_i, clients, chatRooms, clientSender, frame)) {

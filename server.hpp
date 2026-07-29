@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <deque>
 #include <poll.h>
@@ -18,6 +19,8 @@ constexpr int OUTPUT_QUEUE_MAX = 512;
 constexpr int CLIENT_LOOP_BYTE_READ_BUDGET = 512;
 constexpr int CLIENT_LOOP_COMMANDS_BUDGET = 2;
 constexpr int CLIENT_LOOP_BYTE_WRITE_BUDGET = 512;
+constexpr size_t RATE_LIMIT_FRAMES_PER_SECOND = 4;
+constexpr size_t RATE_LIMIT_BYTES_PER_SECOND = 8192;
 
 struct ClientConnection {
     int fd;
@@ -27,6 +30,9 @@ struct ClientConnection {
     std::deque<std::string> outputQueue;
     size_t outputQueueSize;
     int clientState;
+    std::chrono::steady_clock::time_point rateWindowStart;
+    size_t rateWindowFrames;
+    size_t rateWindowBytes;
 };
 
 struct ChatRoom {
