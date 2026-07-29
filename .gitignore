@@ -2,3 +2,5 @@ a.out
 server
 client
 info.md
+
+__pycache__
