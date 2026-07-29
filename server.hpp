@@ -10,6 +10,8 @@
 constexpr char PORT[] = "1234";
 constexpr int QUEUE_LENGTH = 10;
 constexpr int MAX_DATA_SIZE = 256;
+constexpr size_t MAX_FRAME_BYTES = 4096;
+constexpr size_t MAX_INPUT_BUFFER_BYTES = 8192;
 constexpr int CLIENT_AWAITING_USERNAME = 0;
 constexpr int CLIENT_ACTIVE = 1;
 constexpr int OUTPUT_QUEUE_MAX = 512;
@@ -21,7 +23,7 @@ struct ClientConnection {
     int fd;
     std::string username;
     int currRoom;
-    char inputBuf[MAX_DATA_SIZE];
+    std::string inputBuffer;
     std::deque<std::string> outputQueue;
     size_t outputQueueSize;
     int clientState;
@@ -54,5 +56,5 @@ void processCommand(std::string command);
 
 void createChatRoom(std::string roomName, std::vector<struct ChatRoom> *listOfRooms);
 void joinChatRoom(struct ClientConnection *client, std::string roomToJoin, std::vector<ChatRoom> &chatRooms);
-void listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms);
+bool listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms);
 void checkDeleteChatRoom(int roomIdToDelete, std::vector<ChatRoom> &chatRooms);
