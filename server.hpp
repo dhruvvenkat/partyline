@@ -43,7 +43,7 @@ const char *inet_ntop2(void *addr, char *buf, size_t size);
 int getListenerSocket();
 void addToPFDs(std::vector<struct pollfd> *pfds, int newfd);
 void removePFD(std::vector<struct pollfd> *pfds, int i);
-void disconnectClient(std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients, const std::string &reasonForDisconnection);
+void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection);
 bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes);
 bool flushOutput(struct pollfd *pfd, ClientConnection *client);
 

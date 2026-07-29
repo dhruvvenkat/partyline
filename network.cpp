@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 #include <arpa/inet.h>
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -100,12 +101,21 @@ void removePFD(std::vector<struct pollfd> *pfds, int i) {
     pfds->pop_back();
 }
 
-void disconnectClient(std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients, const std::string &reasonForDisconnection) {
-    int fd = (*pfds)[*pfd_i].fd;
-    close(fd);
-    removePFD(pfds, *pfd_i);
-    clients->erase(fd);
-    (*pfd_i)--;
+void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection) {
+    auto pfd = std::find_if(pfds->begin(), pfds->end(), [clientFd](const struct pollfd &candidate) {
+        return candidate.fd == clientFd;
+    });
+    if (pfd == pfds->end()) {
+        return;
+    }
+
+    int removedIndex = static_cast<int>(pfd - pfds->begin());
+    close(clientFd);
+    removePFD(pfds, removedIndex);
+    clients->erase(clientFd);
+    if (currentPfdIndex != nullptr && removedIndex <= *currentPfdIndex) {
+        (*currentPfdIndex)--;
+    }
     std::cout << "client disconnected: " << reasonForDisconnection << std::endl;
 }
 
