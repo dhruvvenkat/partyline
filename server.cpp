@@ -65,7 +65,7 @@ static void notifyRoomMembers(int roomId, int excludedFd, const std::string &mes
 
         if(queueOutput(&(*pfds)[i], &destClient->second, message.data(), message.size()) == false) {
             int oldRoomIdx = destClient->second.currRoom;
-            disconnectClient(pfds, &i, clients);
+            disconnectClient(pfds, &i, clients, "slow client: room notification output queue overflow");
             checkDeleteChatRoom(oldRoomIdx, chatRooms);
         }
     }
@@ -135,7 +135,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
         if (tokens[0] == "LIST") {
             std::cout << "list picked" << std::endl;
             if (!listChatRooms(&(*pfds)[*pfd_i], clientSender, *chatRooms)) {
-                disconnectClient(pfds, pfd_i, clients);
+                disconnectClient(pfds, pfd_i, clients, "slow client: LIST response output queue overflow");
                 return false;
             }
             return true;
@@ -173,7 +173,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
                 : "> server: you are in room " + userRoom->roomName + "\n";
             if (!queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size())) {
                 int oldRoomIdx = clientSender->currRoom;
-                disconnectClient(pfds, pfd_i, clients);
+                disconnectClient(pfds, pfd_i, clients, "slow client: WHERE response output queue overflow");
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 return false;
             }
@@ -183,7 +183,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
             notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients, *chatRooms);
             removeClientFromRooms(senderfd, *chatRooms);
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-            disconnectClient(pfds, pfd_i, clients);
+            disconnectClient(pfds, pfd_i, clients, "client requested QUIT");
             return false;
         }
     } else {
@@ -207,7 +207,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
 
             if (!queueOutput(&(*pfds)[j], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size())) {
                 int oldRoomIdx = destClient->second.currRoom;
-                disconnectClient(pfds, &j, clients);
+                disconnectClient(pfds, &j, clients, "slow client: chat message output queue overflow");
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 return false;
             }
@@ -240,7 +240,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
             if (clientSender->inputBuffer.size() > MAX_INPUT_BUFFER_BYTES) {
                 std::cerr << "server: input buffer limit exceeded for fd " << senderfd << std::endl;
-                disconnectClient(pfds, pfd_i, clients);
+                disconnectClient(pfds, pfd_i, clients, "input buffer limit exceeded");
                 return;
             }
 
@@ -249,7 +249,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                 if (newline == std::string::npos) {
                     if (clientSender->inputBuffer.size() > MAX_FRAME_BYTES) {
                         std::cerr << "server: frame limit exceeded for fd " << senderfd << std::endl;
-                        disconnectClient(pfds, pfd_i, clients);
+                        disconnectClient(pfds, pfd_i, clients, "input frame limit exceeded");
                         return;
                     }
                     break;
@@ -257,7 +257,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
                 if (newline > MAX_FRAME_BYTES) {
                     std::cerr << "server: frame limit exceeded for fd " << senderfd << std::endl;
-                    disconnectClient(pfds, pfd_i, clients);
+                    disconnectClient(pfds, pfd_i, clients, "input frame limit exceeded");
                     return;
                 }
 
@@ -292,7 +292,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
             notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients, *chatRooms);
             removeClientFromRooms(senderfd, *chatRooms);
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-            disconnectClient(pfds, pfd_i, clients);
+            disconnectClient(pfds, pfd_i, clients, "peer closed connection");
             return;
         }
 
@@ -306,7 +306,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, clients, *chatRooms);
         removeClientFromRooms(senderfd, *chatRooms);
         checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-        disconnectClient(pfds, pfd_i, clients);
+        disconnectClient(pfds, pfd_i, clients, "recv failed");
         return;
     }
 }
@@ -339,7 +339,7 @@ void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, 
                 notifyRoomMembers(oldRoomIdx, fd, leftMessage, listener, pfds, clients, *chatRooms);
                 removeClientFromRooms(fd, *chatRooms);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-                disconnectClient(pfds, &i, clients);
+                disconnectClient(pfds, &i, clients, "send failed");
             }
         }
     }

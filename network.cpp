@@ -94,17 +94,19 @@ void addToPFDs(std::vector<struct pollfd> *pfds, int newfd) {
     pfds->push_back({newfd, POLLIN, 0});
 }
 
+// Swap-and-pop to remove the relevant PFD
 void removePFD(std::vector<struct pollfd> *pfds, int i) {
     (*pfds)[i] = pfds->back();
     pfds->pop_back();
 }
 
-void disconnectClient(std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients) {
+void disconnectClient(std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients, const std::string &reasonForDisconnection) {
     int fd = (*pfds)[*pfd_i].fd;
     close(fd);
     removePFD(pfds, *pfd_i);
     clients->erase(fd);
     (*pfd_i)--;
+    std::cout << "client disconnected: " << reasonForDisconnection << std::endl;
 }
 
 bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
