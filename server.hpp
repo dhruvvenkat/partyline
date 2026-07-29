@@ -13,7 +13,9 @@ constexpr int MAX_DATA_SIZE = 256;
 constexpr int CLIENT_AWAITING_USERNAME = 0;
 constexpr int CLIENT_ACTIVE = 1;
 constexpr int OUTPUT_QUEUE_MAX = 512;
-
+constexpr int CLIENT_LOOP_BYTE_READ_BUDGET = 512;
+constexpr int CLIENT_LOOP_COMMANDS_BUDGET = 2;
+constexpr int CLIENT_LOOP_BYTE_WRITE_BUDGET = 512;
 
 struct ClientConnection {
     int fd;
