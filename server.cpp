@@ -17,7 +17,7 @@
 #include <unordered_set>
 #include <cstring>
 
-static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "MSG", "QUIT", "WHERE"};
+static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "QUIT", "WHERE"};
 
 bool isReservedKeyword(std::string_view cmd) {
     return reservedKeywords.find(std::string(cmd)) != reservedKeywords.end();
@@ -240,7 +240,9 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
                 int oldRoomIdx = destClient->second.currRoom;
                 disconnectClient(pfds, pfd_i, clients, destfd, "slow client: chat message output queue overflow");
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-                return false;
+                //return false;
+                j--; // Since disconnected client was swapped-and-poppped, we have to review the current slot again since it's populated with a new client
+                continue;
             }
         }
     }

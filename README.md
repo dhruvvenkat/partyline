@@ -1,4 +1,4 @@
-# Event-Driven Chat Server
+# Partyline: An Event-Driven TCP Chat Server
 
 A C++ TCP chat server built around a single `poll()` event loop. It accepts multiple clients, tracks per-client state, and broadcasts messages without dedicating a thread to each connection.
 
