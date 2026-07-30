@@ -106,6 +106,7 @@ ClientConnection packClientStruct(int fd, std::string username) {
     newConnection.username = username;
     newConnection.currRoom = 0;
     newConnection.outputQueueSize = 0;
+    newConnection.peakPendingOutputBytes = 0;
     newConnection.clientState = username.empty() ? CLIENT_AWAITING_USERNAME : CLIENT_ACTIVE;
     newConnection.rateWindowStart = std::chrono::steady_clock::now();
     newConnection.rateWindowFrames = 0;

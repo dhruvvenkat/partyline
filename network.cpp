@@ -110,26 +110,38 @@ void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, st
     }
 
     int removedIndex = static_cast<int>(pfd - pfds->begin());
+    size_t pendingBytes = 0;
+    size_t peakPendingBytes = 0;
+    auto client = clients->find(clientFd);
+    if (client != clients->end()) {
+        pendingBytes = client->second.outputQueueSize;
+        peakPendingBytes = client->second.peakPendingOutputBytes;
+    }
+
     close(clientFd);
     removePFD(pfds, removedIndex);
     clients->erase(clientFd);
     if (currentPfdIndex != nullptr && removedIndex <= *currentPfdIndex) {
         (*currentPfdIndex)--;
     }
-    std::cout << "client disconnected: " << reasonForDisconnection << std::endl;
+    std::cout << "disconnect fd=" << clientFd
+              << " reason=" << reasonForDisconnection
+              << " pending=" << pendingBytes
+              << " peak=" << peakPendingBytes << std::endl;
 }
 
 bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
-    // Slow-client protection; if a client's output queue exceeds 512 bytes, the connection is stalled and we cut the connection
-    if ((client->outputQueueSize + numBytes) < OUTPUT_QUEUE_MAX) {
-        client->outputQueue.push_back({std::string(data, numBytes), 0});
-        client->outputQueueSize += numBytes;
-        pfd->events |= POLLOUT;
-
-        return true;
+    // Slow-client protection: reject an enqueue that would exceed this client's byte budget
+    if (client->outputQueueSize > MAX_PENDING_OUTPUT_BYTES ||
+        numBytes > MAX_PENDING_OUTPUT_BYTES - client->outputQueueSize) {
+        return false;
     }
 
-    return false;
+    client->outputQueue.push_back({std::string(data, numBytes), 0});
+    client->outputQueueSize += numBytes;
+    client->peakPendingOutputBytes = std::max(client->peakPendingOutputBytes, client->outputQueueSize);
+    pfd->events |= POLLOUT;
+    return true;
 }
 
 bool flushOutput(struct pollfd *pfd, ClientConnection *client) {

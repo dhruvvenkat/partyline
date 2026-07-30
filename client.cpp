@@ -77,7 +77,7 @@ void render(const std::deque<std::string> &messages, const std::string &room, co
     } else if (usernameMode) {
         std::cout << " username: " << input;
     } else {
-        std::cout << " > " << input;
+        std::cout << "> " << input;
     }
     std::cout << std::flush;
 }
@@ -212,11 +212,13 @@ int main(int argc, char **argv) {
             for (ssize_t i = 0; i < numBytes; i++) {
                 unsigned char ch = buffer[i];
 
+                // End-of-text ASCII value
                 if (ch == 3) {
                     running = false;
                     break;
                 }
 
+                // End-of-transmission ASCII value
                 if (ch == 4 && input.empty()) {
                     running = false;
                     break;

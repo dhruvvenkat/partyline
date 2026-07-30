@@ -15,7 +15,7 @@ constexpr size_t MAX_FRAME_BYTES = 4096;
 constexpr size_t MAX_INPUT_BUFFER_BYTES = 8192;
 constexpr int CLIENT_AWAITING_USERNAME = 0;
 constexpr int CLIENT_ACTIVE = 1;
-constexpr int OUTPUT_QUEUE_MAX = 512;
+constexpr size_t MAX_PENDING_OUTPUT_BYTES = 16384; // 16kb of pending output space for slow-client protection/backpressure
 constexpr int CLIENT_LOOP_BYTE_READ_BUDGET = 512;
 constexpr int CLIENT_LOOP_COMMANDS_BUDGET = 2;
 constexpr int CLIENT_LOOP_BYTE_WRITE_BUDGET = 512;
@@ -34,6 +34,7 @@ struct ClientConnection {
     std::string inputBuffer;
     std::deque<PendingWrite> outputQueue;
     size_t outputQueueSize;
+    size_t peakPendingOutputBytes;
     int clientState;
     std::chrono::steady_clock::time_point rateWindowStart;
     size_t rateWindowFrames;
