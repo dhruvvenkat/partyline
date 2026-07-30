@@ -133,14 +133,13 @@ void handleConnection(int listener, std::vector<struct pollfd> *pfds, std::unord
         return;
     }
 
-    if (send(incomingfd, "enter your username: ", 21, MSG_NOSIGNAL) == -1) {
-        perror("server: username prompt did not work");
-        close(incomingfd);
+    addToPFDs(pfds, incomingfd);
+    auto client = clients->emplace(incomingfd, packClientStruct(incomingfd, "")).first;
+    constexpr char usernamePrompt[] = "enter your username: ";
+    if (!queueOutput(&pfds->back(), &client->second, usernamePrompt, sizeof(usernamePrompt) - 1)) {
+        disconnectClient(pfds, nullptr, clients, incomingfd, "username prompt output queue overflow");
         return;
     }
-
-    addToPFDs(pfds, incomingfd);
-    clients->insert({incomingfd, packClientStruct(incomingfd, "")});
 
     std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << "; awaiting username" << std::endl;
 }
@@ -441,7 +440,6 @@ int main(void) {
     std::vector<struct ChatRoom> chatRooms;
 
     createChatRoom("main-room", &chatRooms);
-    createChatRoom("test-room", &chatRooms);
 
     puts("pollserver: waiting for connections...");
 
