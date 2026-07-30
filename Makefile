@@ -1,6 +1,9 @@
 all: server client
 
-.PHONY: asan
+.PHONY: asan benchmark
+
+benchmark: server
+	python3 bench/benchmark.py
 
 asan: server_asan
 
