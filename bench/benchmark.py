@@ -66,25 +66,47 @@ def run_healthy_benchmark(client_count, sender_count, messages_per_second, durat
     port = find_free_port()
     environment = os.environ.copy()
     environment["CHAT_SERVER_PORT"] = str(port)
+    print(f"starting server on port {port}", flush=True)
     server = subprocess.Popen(
         [str(SERVER)],
         cwd=ROOT,
         env=environment,
         start_new_session=True,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.STDOUT,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
     )
     clients = []
     stop_readers = threading.Event()
     stop_senders = threading.Event()
     latencies_ms = []
     disconnects = []
+    server_disconnects = []
     sent_counts = [0] * sender_count
     lock = threading.Lock()
+    collect_server_events = threading.Event()
+
+    def read_server_events():
+        for line in server.stderr:
+            line = line.rstrip()
+            if not line or not collect_server_events.is_set():
+                continue
+            print(f"server: {line}", flush=True)
+            if line.startswith("disconnect "):
+                with lock:
+                    server_disconnects.append(line)
+
+    server_log_reader = threading.Thread(target=read_server_events, daemon=True)
+    server_log_reader.start()
 
     try:
+        collect_server_events.set()
+        connection_interval = max(1, client_count // 10)
         for index in range(client_count):
             clients.append(connect_client(port, f"bench-{index}"))
+            if (index + 1) % connection_interval == 0 or index + 1 == client_count:
+                print(f"connected {index + 1}/{client_count} clients", flush=True)
 
         observer = clients[-1]
 
@@ -145,20 +167,42 @@ def run_healthy_benchmark(client_count, sender_count, messages_per_second, durat
                 except OSError:
                     return
 
-                sent_counts[index] += 1
+                with lock:
+                    sent_counts[index] += 1
                 sequence += 1
                 next_send += 1 / messages_per_second
 
         senders = [threading.Thread(target=send_messages, args=(index,), daemon=True) for index in range(sender_count)]
         for sender in senders:
             sender.start()
+
+        print(f"measuring healthy workload for {duration:.0f}s", flush=True)
+        next_progress = start + 1
+        while time.monotonic() < end:
+            time.sleep(min(0.1, max(0, end - time.monotonic())))
+            if time.monotonic() < next_progress:
+                continue
+
+            with lock:
+                sent_so_far = sum(sent_counts)
+                received_so_far = len(latencies_ms)
+                disconnected_so_far = list(disconnects)
+                server_disconnects_so_far = list(server_disconnects)
+            elapsed_so_far = time.monotonic() - start
+            print(
+                f"progress {elapsed_so_far:.0f}/{duration:.0f}s "
+                f"sent={sent_so_far} observer_received={received_so_far} "
+                f"disconnected={disconnected_so_far} "
+                f"server_disconnects={len(server_disconnects_so_far)}",
+                flush=True,
+            )
+            next_progress += 1
+
         for sender in senders:
-            sender.join(timeout=duration + 1)
+            sender.join(timeout=1)
 
         stop_senders.set()
-        remaining = end - time.monotonic()
-        if remaining > 0:
-            time.sleep(remaining)
+        print("draining final messages", flush=True)
         time.sleep(0.25)
         elapsed = end - start
         stop_readers.set()
@@ -168,6 +212,7 @@ def run_healthy_benchmark(client_count, sender_count, messages_per_second, durat
         with lock:
             samples = list(latencies_ms)
             disconnected_clients = list(disconnects)
+            disconnect_reasons = list(server_disconnects)
 
         sent = sum(sent_counts)
         received = len(samples)
@@ -179,9 +224,16 @@ def run_healthy_benchmark(client_count, sender_count, messages_per_second, durat
         else:
             print("p50_latency=n/a p95_latency=n/a")
         print(f"disconnected_clients={disconnected_clients}")
+        if disconnect_reasons:
+            print("disconnect_reasons:")
+            for reason in disconnect_reasons:
+                print(f"  {reason}")
+        else:
+            print("disconnect_reasons: none")
     finally:
         stop_senders.set()
         stop_readers.set()
+        collect_server_events.clear()
         for client in clients:
             client.close()
         if server.poll() is None:
@@ -191,6 +243,7 @@ def run_healthy_benchmark(client_count, sender_count, messages_per_second, durat
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait()
+        server_log_reader.join(timeout=1)
 
 
 def main():

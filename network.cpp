@@ -117,10 +117,12 @@ void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, st
     int removedIndex = static_cast<int>(pfd - pfds->begin());
     size_t pendingBytes = 0;
     size_t peakPendingBytes = 0;
+    std::string username;
     auto client = clients->find(clientFd);
     if (client != clients->end()) {
         pendingBytes = client->second.outputQueueSize;
         peakPendingBytes = client->second.peakPendingOutputBytes;
+        username = client->second.username;
     }
 
     close(clientFd);
@@ -129,7 +131,8 @@ void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, st
     if (currentPfdIndex != nullptr && removedIndex <= *currentPfdIndex) {
         (*currentPfdIndex)--;
     }
-    std::cout << "disconnect fd=" << clientFd
+    std::cerr << "disconnect fd=" << clientFd
+              << " username=" << username
               << " reason=" << reasonForDisconnection
               << " pending=" << pendingBytes
               << " peak=" << peakPendingBytes << std::endl;
