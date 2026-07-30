@@ -22,12 +22,17 @@ constexpr int CLIENT_LOOP_BYTE_WRITE_BUDGET = 512;
 constexpr size_t RATE_LIMIT_FRAMES_PER_SECOND = 4;
 constexpr size_t RATE_LIMIT_BYTES_PER_SECOND = 8192;
 
+struct PendingWrite {
+    std::string data;
+    size_t offset = 0;
+};
+
 struct ClientConnection {
     int fd;
     std::string username;
     int currRoom;
     std::string inputBuffer;
-    std::deque<std::string> outputQueue;
+    std::deque<PendingWrite> outputQueue;
     size_t outputQueueSize;
     int clientState;
     std::chrono::steady_clock::time_point rateWindowStart;

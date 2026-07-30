@@ -122,7 +122,7 @@ void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, st
 bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
     // Slow-client protection; if a client's output queue exceeds 512 bytes, the connection is stalled and we cut the connection
     if ((client->outputQueueSize + numBytes) < OUTPUT_QUEUE_MAX) {
-        client->outputQueue.emplace_back(data, numBytes);
+        client->outputQueue.push_back({std::string(data, numBytes), 0});
         client->outputQueueSize += numBytes;
         pfd->events |= POLLOUT;
 
@@ -134,14 +134,14 @@ bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data,
 
 bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
     while (!client->outputQueue.empty()) {
-        std::string &pending = client->outputQueue.front();
-        ssize_t numBytes = send(client->fd, pending.data(), pending.size(), MSG_NOSIGNAL);
+        PendingWrite &pending = client->outputQueue.front();
+        ssize_t numBytes = send(client->fd, pending.data.data() + pending.offset, pending.data.size() - pending.offset, MSG_NOSIGNAL);
 
         if (numBytes > 0) {
-            pending.erase(0, numBytes);
+            pending.offset += numBytes;
             client->outputQueueSize -= numBytes;
 
-            if (pending.empty()) {
+            if (pending.offset == pending.data.size()) {
                 client->outputQueue.pop_front();
             }
         } else if (numBytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
