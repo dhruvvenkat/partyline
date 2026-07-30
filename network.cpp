@@ -50,7 +50,12 @@ int getListenerSocket(void) {
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_flags = AI_PASSIVE;
 
-    if ((rv = getaddrinfo(NULL, PORT, &hints, &ai)) != 0) {
+    const char *port = std::getenv("CHAT_SERVER_PORT");
+    if (port == nullptr || *port == '\0') {
+        port = PORT;
+    }
+
+    if ((rv = getaddrinfo(NULL, port, &hints, &ai)) != 0) {
         std::cerr << "pollserver: " << gai_strerror(rv) << std::endl;
         exit(1);
     }
@@ -145,13 +150,18 @@ bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data,
 }
 
 bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
-    while (!client->outputQueue.empty()) {
+    size_t bytesWritten = 0;
+    while (!client->outputQueue.empty() && bytesWritten < MAX_BYTES_WRITTEN_PER_POLL) {
         PendingWrite &pending = client->outputQueue.front();
-        ssize_t numBytes = send(client->fd, pending.data.data() + pending.offset, pending.data.size() - pending.offset, MSG_NOSIGNAL);
+        size_t bytesRemaining = pending.data.size() - pending.offset;
+        size_t writeBudget = MAX_BYTES_WRITTEN_PER_POLL - bytesWritten;
+        size_t bytesToSend = std::min(bytesRemaining, writeBudget);
+        ssize_t numBytes = send(client->fd, pending.data.data() + pending.offset, bytesToSend, MSG_NOSIGNAL);
 
         if (numBytes > 0) {
             pending.offset += numBytes;
             client->outputQueueSize -= numBytes;
+            bytesWritten += numBytes;
 
             if (pending.offset == pending.data.size()) {
                 client->outputQueue.pop_front();

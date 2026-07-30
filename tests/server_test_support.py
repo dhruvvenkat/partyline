@@ -1,3 +1,4 @@
+import os
 import socket
 import subprocess
 import time
@@ -6,10 +7,14 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TESTS = ROOT / "tests"
 SERVER = ROOT / "server"
 HOST = "127.0.0.1"
-PORT = 1234
+
+
+def find_free_port():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind((HOST, 0))
+        return sock.getsockname()[1]
 
 
 def receive_until(sock, marker, timeout=2.0):
@@ -49,16 +54,17 @@ class ChatServerTestCase(unittest.TestCase):
         subprocess.run(["make", "-B", "server"], cwd=ROOT, check=True)
 
     def setUp(self):
+        self.port = find_free_port()
+        environment = os.environ.copy()
+        environment["CHAT_SERVER_PORT"] = str(self.port)
         self.server = subprocess.Popen(
             [str(SERVER)],
             cwd=ROOT,
+            env=environment,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
         )
         self.clients = []
-        time.sleep(0.05)
-        if self.server.poll() is not None:
-            raise unittest.SkipTest("port 1234 is already in use; stop the existing server first")
         self.receiver = self.connect_client("receiver")
         self.drain(self.receiver)
 
@@ -80,11 +86,11 @@ class ChatServerTestCase(unittest.TestCase):
 
         while time.monotonic() < deadline:
             if self.server.poll() is not None:
-                raise AssertionError("test server exited; port 1234 may already be in use")
+                raise AssertionError("test server exited before accepting connections")
 
             sock = None
             try:
-                sock = socket.create_connection((HOST, PORT), timeout=0.2)
+                sock = socket.create_connection((HOST, self.port), timeout=0.2)
                 sock.settimeout(1)
                 receive_until(sock, b"enter your username: ")
                 sock.sendall((username + "\n").encode())
