@@ -69,7 +69,7 @@ static bool rateLimitExceeded(ClientConnection *client, size_t frameBytes) {
     return false;
 }
 
-static void notifyRoomMembers(int roomId, int excludedFd, const std::string &message, int listener, std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, std::vector<struct ChatRoom> chatRooms,  std::map<int, int> *pfdMappings) {
+static void notifyRoomMembers(int roomId, int excludedFd, const std::string &message, int listener, std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, std::vector<struct ChatRoom> &chatRooms,  std::map<int, int> *pfdMappings) {
     for (int i = 0; i < (int)pfds->size(); i++) {
         int destfd = (*pfds)[i].fd;
         if (destfd == listener || destfd == excludedFd) {
@@ -159,7 +159,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
     tokenizeBySpaces(command, tokens);
     if (!tokens.empty() && isReservedKeyword(tokens[0])) {
         if (tokens[0] == "LIST") {
-            std::cout << "list picked" << std::endl;
+            //std::cout << "list picked" << std::endl;
             if (!listChatRooms(&(*pfds)[*pfd_i], clientSender, *chatRooms)) {
                 disconnectClient(pfds, pfd_i, clients, senderfd, "slow client: LIST response output queue overflow", pfdMappings);
                 return false;
@@ -167,7 +167,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
             return true;
 
         } else if (tokens[0] == "JOIN" && tokens.size() == 2) {
-            std::cout << "join picked" << std::endl;
+            //std::cout << "join picked" << std::endl;
             int oldRoomIdx = clientSender->currRoom;
             std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
             if (oldRoomName != tokens[1]) {
@@ -182,7 +182,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
         } else if (tokens[0] == "LEAVE" && clientSender->currRoom != 0) {
-            std::cout << "leave picked" << std::endl;
+            //std::cout << "leave picked" << std::endl;
             int oldRoomIdx = clientSender->currRoom;
             std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
             std::string leftMessage = "> server: " + clientSender->username + " left room " + oldRoomName + "\n";
@@ -226,7 +226,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
         }
         formattedOutboundMsg += "\n";
 
-        std::cout << formattedOutboundMsg;
+        //std::cout << formattedOutboundMsg;
         int broadcastRoomIdx = clientSender->currRoom;
         struct ChatRoom broadcastRoom = chatRooms->at(broadcastRoomIdx);
         for (int j = 0; j < (int)broadcastRoom.subscribedClients.size(); j++) {
@@ -247,9 +247,9 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
                 removeClientFromRooms(senderfd, *chatRooms);
                 disconnectClient(pfds, pfd_i, clients, destfd, "slow client: chat message output queue overflow", pfdMappings);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-                //return false;
-                j--; // Since disconnected client was swapped-and-poppped, we have to review the current slot again since it's populated with a new client
-                continue;
+                return false;
+                //j--; // Since disconnected client was swapped-and-poppped, we have to review the current slot again since it's populated with a new client
+                //continue;
             }
         }
     }
