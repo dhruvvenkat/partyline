@@ -83,6 +83,7 @@ static void notifyRoomMembers(int roomId, int excludedFd, const std::string &mes
 
         if(queueOutput(&(*pfds)[i], &destClient->second, message.data(), message.size()) == false) {
             int oldRoomIdx = destClient->second.currRoom;
+            removeClientFromRooms(destfd, chatRooms);
             disconnectClient(pfds, currentPfdIndex, clients, destfd, "slow client: room notification output queue overflow", pfdMappings);
             i--;
             checkDeleteChatRoom(oldRoomIdx, chatRooms);
@@ -201,6 +202,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
                 : "> server: you are in room " + userRoom->roomName + "\n";
             if (!queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size())) {
                 int oldRoomIdx = clientSender->currRoom;
+                removeClientFromRooms(senderfd, *chatRooms);
                 disconnectClient(pfds, pfd_i, clients, senderfd, "slow client: WHERE response output queue overflow", pfdMappings);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 return false;
@@ -242,6 +244,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
 
             if (!queueOutput(&(*pfds)[pfdIdx], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size())) {
                 int oldRoomIdx = destClient->second.currRoom;
+                removeClientFromRooms(senderfd, *chatRooms);
                 disconnectClient(pfds, pfd_i, clients, destfd, "slow client: chat message output queue overflow", pfdMappings);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 //return false;
