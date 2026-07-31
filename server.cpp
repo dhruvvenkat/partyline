@@ -227,10 +227,15 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
         formattedOutboundMsg += "\n";
 
         //std::cout << formattedOutboundMsg;
-        int broadcastRoomIdx = clientSender->currRoom;
-        struct ChatRoom broadcastRoom = chatRooms->at(broadcastRoomIdx);
-        for (int j = 0; j < (int)broadcastRoom.subscribedClients.size(); j++) {
-            int destfd = broadcastRoom.subscribedClients[j];
+        // Since room deletion changes the indexes of the rooms themselves, we have to do a sweep before broadcasting to make sure we don't broadcast to the wrong room ID
+        auto broadcastRoom = std::find_if(chatRooms->begin(), chatRooms->end(), [&](const ChatRoom &room) {
+            return room.roomIdx == clientSender->currRoom;
+        });
+        if (broadcastRoom == chatRooms->end()) {
+            return false;
+        }
+
+        for (int destfd : broadcastRoom->subscribedClients) {
             if (destfd == listener || destfd == senderfd) {
                 continue;
             }
@@ -244,7 +249,7 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
 
             if (!queueOutput(&(*pfds)[pfdIdx], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size())) {
                 int oldRoomIdx = destClient->second.currRoom;
-                removeClientFromRooms(senderfd, *chatRooms);
+                removeClientFromRooms(destfd, *chatRooms);
                 disconnectClient(pfds, pfd_i, clients, destfd, "slow client: chat message output queue overflow", pfdMappings);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 return false;

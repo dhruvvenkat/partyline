@@ -103,9 +103,15 @@ void addToPFDs(std::vector<struct pollfd> *pfds, int newfd, std::map<int, int> *
 
 // Swap-and-pop to remove the relevant PFD
 void removePFD(std::vector<struct pollfd> *pfds, int i, int fdToRemove, std::map<int, int> *pfdMappings) {
+    int movedFd = pfds->back.fd;
     (*pfds)[i] = pfds->back();
     pfds->pop_back();
     pfdMappings->erase(fdToRemove);
+
+    // Update the moved PFD's entry in the PFD mapping object
+    if (i < (int)pfds->size()) {
+        (*pfdMappings)[movedFd] = i;
+    }
 }
 
 void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection, std::map<int, int> *pfdMappings) {
