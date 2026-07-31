@@ -96,17 +96,19 @@ int getListenerSocket(void) {
     return listener;
 }
 
-void addToPFDs(std::vector<struct pollfd> *pfds, int newfd) {
+void addToPFDs(std::vector<struct pollfd> *pfds, int newfd, std::map<int, int> *pfdMappings) {
     pfds->push_back({newfd, POLLIN, 0});
+    pfdMappings->insert(std::pair<int, int>{newfd, (int)pfds->size()-1}); // Update the mapping object that connects socket FDs to their PFDs
 }
 
 // Swap-and-pop to remove the relevant PFD
-void removePFD(std::vector<struct pollfd> *pfds, int i) {
+void removePFD(std::vector<struct pollfd> *pfds, int i, int fdToRemove, std::map<int, int> *pfdMappings) {
     (*pfds)[i] = pfds->back();
     pfds->pop_back();
+    pfdMappings->erase(fdToRemove);
 }
 
-void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection) {
+void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection, std::map<int, int> *pfdMappings) {
     auto pfd = std::find_if(pfds->begin(), pfds->end(), [clientFd](const struct pollfd &candidate) {
         return candidate.fd == clientFd;
     });
@@ -126,7 +128,7 @@ void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, st
     }
 
     close(clientFd);
-    removePFD(pfds, removedIndex);
+    removePFD(pfds, removedIndex, clientFd, pfdMappings);
     clients->erase(clientFd);
     if (currentPfdIndex != nullptr && removedIndex <= *currentPfdIndex) {
         (*currentPfdIndex)--;
