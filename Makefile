@@ -1,9 +1,12 @@
 all: server client
 
-.PHONY: asan benchmark
+.PHONY: asan benchmark benchmark-smoke
 
 benchmark: server
-	python3 bench/benchmark.py
+	python3 bench/benchmark.py --output bench/results/poll.csv
+
+benchmark-smoke: server
+	python3 bench/benchmark.py --tiers 2,10 --runs 1 --warmup 0.5 --duration 1
 
 asan: server_asan
 
