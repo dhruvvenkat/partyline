@@ -103,7 +103,7 @@ void addToPFDs(std::vector<struct pollfd> *pfds, int newfd, std::map<int, int> *
 
 // Swap-and-pop to remove the relevant PFD
 void removePFD(std::vector<struct pollfd> *pfds, int i, int fdToRemove, std::map<int, int> *pfdMappings) {
-    int movedFd = pfds->back.fd;
+    int movedFd = pfds->back().fd;
     (*pfds)[i] = pfds->back();
     pfds->pop_back();
     pfdMappings->erase(fdToRemove);
