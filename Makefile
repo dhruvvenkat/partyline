@@ -3,7 +3,11 @@ all: server client
 .PHONY: asan benchmark benchmark-smoke
 
 benchmark: server
-	python3 bench/benchmark.py --output bench/results/poll.csv
+	python3 bench/benchmark.py --label poll-unlimited --tiers 10,50,100,500 --workloads direct --rate 100 --output bench/results/poll-unlimited-direct-r100.csv
+	python3 bench/benchmark.py --label poll-unlimited --tiers 10 --workloads broadcast --rate 2000 --output bench/results/poll-unlimited-broadcast-10-r2000.csv
+	python3 bench/benchmark.py --label poll-unlimited --tiers 50 --workloads broadcast --rate 200 --output bench/results/poll-unlimited-broadcast-50-r200.csv
+	python3 bench/benchmark.py --label poll-unlimited --tiers 100 --workloads broadcast --rate 60 --output bench/results/poll-unlimited-broadcast-100-r60.csv
+	python3 bench/benchmark.py --label poll-unlimited --tiers 500 --workloads broadcast --rate 2 --output bench/results/poll-unlimited-broadcast-500-r2.csv
 
 benchmark-smoke: server
 	python3 bench/benchmark.py --tiers 2,10 --runs 1 --warmup 0.5 --duration 1

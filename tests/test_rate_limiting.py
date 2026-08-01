@@ -1,12 +1,12 @@
-from server_test_support import ChatServerTestCase, wait_for_close
+from server_test_support import ChatServerTestCase, receive_until
 
 
-class RateLimitingTests(ChatServerTestCase):
-    def test_rate_limit_disconnects_sender(self):
+class BurstTrafficTests(ChatServerTestCase):
+    def test_sender_can_exceed_old_rate_limit(self):
         sender = self.connect_client("sender")
         self.drain(self.receiver)
 
         sender.sendall(b"spam\n" * 5)
-
-        wait_for_close(sender)
-        self.assert_receiver_alive()
+        sender.sendall(b"WHERE\n")
+        response = receive_until(sender, b"you are in room main-room")
+        self.assertIn(b"you are in room main-room", response)

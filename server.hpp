@@ -1,6 +1,5 @@
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <deque>
 #include <poll.h>
@@ -17,8 +16,6 @@ constexpr size_t MAX_INPUT_BUFFER_BYTES = 8192;
 constexpr int CLIENT_AWAITING_USERNAME = 0;
 constexpr int CLIENT_ACTIVE = 1;
 constexpr size_t MAX_PENDING_OUTPUT_BYTES = 16384; // 16kb of pending output space for slow-client protection/backpressure
-constexpr size_t RATE_LIMIT_FRAMES_PER_SECOND = 4;
-constexpr size_t RATE_LIMIT_BYTES_PER_SECOND = 8192;
 constexpr size_t MAX_BYTES_READ_PER_POLL = 8192;
 constexpr size_t MAX_BYTES_WRITTEN_PER_POLL = 8192;
 constexpr size_t MAX_PROCESSED_FRAMES_PER_POLL = 32;
@@ -37,9 +34,6 @@ struct ClientConnection {
     size_t outputQueueSize;
     size_t peakPendingOutputBytes;
     int clientState;
-    std::chrono::steady_clock::time_point rateWindowStart;
-    size_t rateWindowFrames;
-    size_t rateWindowBytes;
 };
 
 struct ChatRoom {

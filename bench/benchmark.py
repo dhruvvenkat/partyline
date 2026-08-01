@@ -482,9 +482,6 @@ def main():
         parser.error("runs, duration, rate, and drain must be positive")
     if args.warmup < 0 or not 0 <= args.payload_size <= 4000:
         parser.error("warmup and payload size are out of range")
-    if args.rate >= 4:
-        parser.error("rate must stay below the server's 4 frames/s disconnect limit")
-
     print(
         f"server={server_path} label={args.label} "
         f"system={platform.system()} {platform.release()} "
