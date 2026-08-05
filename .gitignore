@@ -1,5 +1,6 @@
 a.out
 server
+server_asan
 client
 info.md
 

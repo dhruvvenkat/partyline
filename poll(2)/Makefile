@@ -22,3 +22,6 @@ server: server.cpp network.cpp server.hpp
 
 client: client.cpp
 	g++ -std=c++17 -Wall -Wextra -pedantic client.cpp -o client
+
+clean:
+	rm server client server_asan
