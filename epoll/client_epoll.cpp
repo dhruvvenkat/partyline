@@ -82,6 +82,13 @@ void render(const std::deque<std::string> &messages, const std::string &room, co
     std::cout << std::flush;
 }
 
+void renderInputLine(const std::string &input, bool usernameMode) {
+    std::cout << "\r\033[2K"
+              << (usernameMode ? " username: " : "> ")
+              << input
+              << std::flush;
+}
+
 bool sendAll(int fd, const std::string &message) {
     size_t sent = 0;
     while (sent < message.size()) {
@@ -177,10 +184,9 @@ int main(int argc, char **argv) {
     bool quitting = false;
     bool running = true;
     addMessage(messages, "Connected to " + std::string(host) + ":" + port);
+    render(messages, room, input, usernameMode, quitting);
 
     while (running) {
-        render(messages, room, input, usernameMode, quitting);
-
         pollfd pfds[2] = {
             {serverfd, POLLIN, 0},
             {STDIN_FILENO, static_cast<short>(quitting ? 0 : POLLIN), 0},
@@ -195,11 +201,15 @@ int main(int argc, char **argv) {
             break;
         }
 
+        bool redraw = false;
+        bool inputChanged = false;
+
         if (pfds[0].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
             if (!receiveServerData(serverfd, received, messages)) {
                 addMessage(messages, "server disconnected");
                 break;
             }
+            redraw = true;
         }
 
         if (pfds[1].revents & POLLIN) {
@@ -227,6 +237,7 @@ int main(int argc, char **argv) {
                 if (ch == '\r' || ch == '\n') {
                     std::string line = input;
                     input.clear();
+                    redraw = true;
 
                     if (usernameMode) {
                         usernameMode = false;
@@ -265,11 +276,19 @@ int main(int argc, char **argv) {
                 if (ch == 127 || ch == '\b') {
                     if (!input.empty()) {
                         input.pop_back();
+                        inputChanged = true;
                     }
                 } else if (std::isprint(ch)) {
                     input.push_back(static_cast<char>(ch));
+                    inputChanged = true;
                 }
             }
+        }
+
+        if (redraw) {
+            render(messages, room, input, usernameMode, quitting);
+        } else if (inputChanged) {
+            renderInputLine(input, usernameMode);
         }
     }
 

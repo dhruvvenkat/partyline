@@ -4,6 +4,7 @@
 #include <deque>
 #include <poll.h>
 #include <string>
+#include <sys/epoll.h>
 #include <unordered_map>
 #include <vector>
 #include <map>
@@ -53,16 +54,16 @@ void addToPFDs(std::vector<struct pollfd> *pfds, int newfd, std::map<int, int> *
 void removePFD(std::vector<struct pollfd> *pfds, int i, std::map<int, int> *pfdMappings);
 void disconnectClient(int epollfd, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection);
 bool queueOutput(struct epoll_event *ev, int epollfd, ClientConnection *client, const char *data, size_t numBytes);
-bool flushOutput(struct pollfd *pfd, ClientConnection *client);
+bool flushOutput(int epollfd, ClientConnection *client);
 
 ClientConnection packClientStruct(int fd, std::string username);
 void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientConnection> *clients);
-void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms);
-void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms, std::map<int, int> *pfdMappings);
+void handleClients(int listener, int incomingfd, int epollfd, std::vector<struct epoll_event> &ready, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms);
+void processExistingConnections(int listener, int epollfd, std::vector<struct epoll_event> &ready, int numReady, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms);
 
 void processCommand(std::string command);
 
 void createChatRoom(std::string roomName, std::vector<struct ChatRoom> *listOfRooms);
 void joinChatRoom(struct ClientConnection *client, std::string roomToJoin, std::vector<ChatRoom> &chatRooms);
-bool listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms);
+bool listChatRooms(int epollfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms);
 void checkDeleteChatRoom(int roomIdToDelete, std::vector<ChatRoom> &chatRooms);

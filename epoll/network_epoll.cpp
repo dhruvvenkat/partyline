@@ -148,10 +148,15 @@ bool queueOutput(struct epoll_event *ev, int epollfd, ClientConnection *client, 
     client->peakPendingOutputBytes = std::max(client->peakPendingOutputBytes, client->outputQueueSize);
     ev->events |= EPOLLOUT;
 
-    return epoll_ctl(epollfd, EPOLL_CTL_MOD, client->fd, ev) == 0;
+    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, client->fd, ev) != 0) {
+        perror("epoll_ctl MOD");
+        return false;
+    }
+
+    return true;
 }
 
-bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
+bool flushOutput(int epollfd, ClientConnection *client) {
     size_t bytesWritten = 0;
     while (!client->outputQueue.empty() && bytesWritten < MAX_BYTES_WRITTEN_PER_POLL) {
         PendingWrite &pending = client->outputQueue.front();
@@ -177,7 +182,11 @@ bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
     }
 
     if (client->outputQueue.empty()) {
-        pfd->events &= ~POLLOUT;
+        struct epoll_event ev{};
+        ev.data.fd = client->fd;
+        ev.events = EPOLLIN | EPOLLRDHUP;
+
+        return epoll_ctl(epollfd, EPOLL_CTL_MOD, client->fd, &ev) == 0;
     }
 
     return true;

@@ -52,23 +52,35 @@ static std::string roomNameForId(int roomId, const std::vector<ChatRoom> &chatRo
     return {};
 }
 
-static void notifyRoomMembers(int roomId, int excludedFd, const std::string &message, int listener, std::vector<struct pollfd> *pfds, int *currentPfdIndex, std::unordered_map<int, ClientConnection> *clients, std::vector<struct ChatRoom> &chatRooms,  std::map<int, int> *pfdMappings) {
-    for (int i = 0; i < (int)pfds->size(); i++) {
-        int destfd = (*pfds)[i].fd;
-        if (destfd == listener || destfd == excludedFd) {
+static void notifyRoomMembers(int roomId, int excludedFd, const std::string &message, int epollfd, std::unordered_map<int, ClientConnection> *clients, std::vector<struct ChatRoom> &chatRooms) {
+    auto room = std::find_if(chatRooms.begin(), chatRooms.end(), [&](const ChatRoom &candidate) {
+        return candidate.roomIdx == roomId;
+    });
+    if (room == chatRooms.end()) {
+        return;
+    }
+
+    const auto recipients = room->subscribedClients;
+    for (int destfd : recipients) {
+        if (destfd == excludedFd) {
             continue;
         }
 
         auto destClient = clients->find(destfd);
-        if (destClient == clients->end() || destClient->second.clientState != CLIENT_ACTIVE || destClient->second.currRoom != roomId) {
+        if (destClient == clients->end() ||
+            destClient->second.clientState != CLIENT_ACTIVE ||
+            destClient->second.currRoom != roomId) {
             continue;
         }
 
-        if(queueOutput(&(*pfds)[i], &destClient->second, message.data(), message.size()) == false) {
+        struct epoll_event ev{};
+        ev.data.fd = destfd;
+        ev.events = EPOLLIN | EPOLLRDHUP;
+
+        if (!queueOutput(&ev, epollfd, &destClient->second, message.data(), message.size())) {
             int oldRoomIdx = destClient->second.currRoom;
             removeClientFromRooms(destfd, chatRooms);
-            disconnectClient(pfds, currentPfdIndex, clients, destfd, "slow client: room notification output queue overflow", pfdMappings);
-            i--;
+            disconnectClient(epollfd, clients, destfd, "slow client: room notification output queue overflow");
             checkDeleteChatRoom(oldRoomIdx, chatRooms);
         }
     }
@@ -143,7 +155,7 @@ void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientC
 }
 
 // 1 frame = 1 command delimited with '\n'
-static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms, ClientConnection *clientSender, const std::string &command,  std::map<int, int> *pfdMappings) {
+static bool processCommandFrame(int listener, int epollfd, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms, ClientConnection *clientSender, const std::string &command) {
     int senderfd = clientSender->fd;
     if (command.empty()) {
         return true;
@@ -152,10 +164,12 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
     std::vector<std::string> tokens;
     tokenizeBySpaces(command, tokens);
     if (!tokens.empty() && isReservedKeyword(tokens[0])) {
+        // PARSE ONE OF THE RESERVED KEYWORDS
         if (tokens[0] == "LIST") {
             //std::cout << "list picked" << std::endl;
-            if (!listChatRooms(&(*pfds)[*pfd_i], clientSender, *chatRooms)) {
-                disconnectClient(pfds, pfd_i, clients, senderfd, "slow client: LIST response output queue overflow", pfdMappings);
+            if (!listChatRooms(epollfd, clientSender, *chatRooms)) {
+                disconnectClient(epollfd, clients, senderfd, "slow client: LIST response output queue overflow");
+
                 return false;
             }
             return true;
@@ -166,12 +180,12 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
             std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
             if (oldRoomName != tokens[1]) {
                 std::string leftMessage = "> server: " + clientSender->username + " left room " + oldRoomName + "\n";
-                notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
+                notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, epollfd, clients, *chatRooms);
             }
             joinChatRoom(clientSender, tokens[1], *chatRooms);
             if (oldRoomName != tokens[1]) {
                 std::string joinedMessage = "> server: " + clientSender->username + " joined room " + tokens[1] + "\n";
-                notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
+                notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, epollfd, clients, *chatRooms);
             }
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
@@ -180,10 +194,10 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
             int oldRoomIdx = clientSender->currRoom;
             std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
             std::string leftMessage = "> server: " + clientSender->username + " left room " + oldRoomName + "\n";
-            notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
+            notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, epollfd, clients, *chatRooms);
             joinChatRoom(clientSender, "main-room", *chatRooms);
             std::string joinedMessage = "> server: " + clientSender->username + " joined room main-room\n";
-            notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
+            notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, epollfd, clients, *chatRooms);
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
         } else if (tokens[0] == "WHERE" && tokens.size() == 1) {
@@ -194,10 +208,15 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
             std::string output = userRoom == chatRooms->end()
                 ? "> server: room not found\n"
                 : "> server: you are in room " + userRoom->roomName + "\n";
-            if (!queueOutput(&(*pfds)[*pfd_i], clientSender, output.data(), output.size())) {
+
+            struct epoll_event ev{};
+            ev.data.fd = senderfd;
+            ev.events = POLLOUT;
+
+            if (!queueOutput(&ev, epollfd, clientSender, output.data(), output.size())) {
                 int oldRoomIdx = clientSender->currRoom;
                 removeClientFromRooms(senderfd, *chatRooms);
-                disconnectClient(pfds, pfd_i, clients, senderfd, "slow client: WHERE response output queue overflow", pfdMappings);
+                disconnectClient(epollfd, clients, senderfd, "slow client: WHERE response output queue overflow");
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 return false;
             }
@@ -206,10 +225,10 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
 
             int oldRoomIdx = clientSender->currRoom;
             std::string leftMessage = "> server: " + clientSender->username + " has disconnected\n";
-            notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
+            notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, epollfd, clients, *chatRooms);
             removeClientFromRooms(senderfd, *chatRooms);
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-            disconnectClient(pfds, pfd_i, clients, senderfd, "client requested QUIT", pfdMappings);
+            disconnectClient(epollfd, clients, senderfd, "client requested QUIT");
             return false;
 
         }
@@ -239,16 +258,17 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
                 continue;
             }
 
-            int pfdIdx = pfdMappings->at(destfd);
+            struct epoll_event ev{};
+            ev.data.fd = destfd;
+            ev.events = POLLIN;
 
-            if (!queueOutput(&(*pfds)[pfdIdx], &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size())) {
+            if (!queueOutput(&ev, epollfd, &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size())) {
                 int oldRoomIdx = destClient->second.currRoom;
                 removeClientFromRooms(destfd, *chatRooms);
-                disconnectClient(pfds, pfd_i, clients, destfd, "slow client: chat message output queue overflow", pfdMappings);
+                disconnectClient(epollfd, clients, destfd, "slow client: chat message output queue overflow");
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
                 return false;
                 //j--; // Since disconnected client was swapped-and-poppped, we have to review the current slot again since it's populated with a new client
-                //continue;
             }
         }
     }
@@ -257,12 +277,11 @@ static bool processCommandFrame(int listener, std::vector<struct pollfd> *pfds, 
 }
 
 // Handle incoming messages from the client specified by the polling loop in handleExistingConnections
-void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms,  std::map<int, int> *pfdMappings) {
-    int senderfd = (*pfds)[*pfd_i].fd;
+void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms) {
 
     ClientConnection *clientSender;
     try {
-        clientSender = &clients->at(senderfd);
+        clientSender = &clients->at(incomingfd);
     } catch (const std::out_of_range&) {
         std::cerr << "server: sending client not found" << std::endl;
         return;
@@ -273,15 +292,16 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
     size_t framesProcessed = 0;
 
     while (bytesRead < MAX_BYTES_READ_PER_POLL && framesProcessed < MAX_PROCESSED_FRAMES_PER_POLL) {
-        ssize_t numBytes = recv(senderfd, recvBuffer, sizeof recvBuffer, 0);
+        ssize_t numBytes = recv(incomingfd, recvBuffer, sizeof recvBuffer, 0);
 
         if (numBytes > 0) {
             bytesRead += numBytes;
             clientSender->inputBuffer.append(recvBuffer, numBytes);
 
             if (clientSender->inputBuffer.size() > MAX_INPUT_BUFFER_BYTES) {
-                std::cerr << "server: input buffer limit exceeded for fd " << senderfd << std::endl;
-                disconnectClient(pfds, pfd_i, clients, senderfd, "input buffer limit exceeded", pfdMappings);
+                // Slow-client protection
+                std::cerr << "server: input buffer limit exceeded for fd " << incomingfd << std::endl;
+                disconnectClient(epollfd, clients, incomingfd, "input buffer limit exceeded");
                 return;
             }
 
@@ -289,16 +309,16 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                 size_t newline = clientSender->inputBuffer.find('\n');
                 if (newline == std::string::npos) {
                     if (clientSender->inputBuffer.size() > MAX_FRAME_BYTES) {
-                        std::cerr << "server: frame limit exceeded for fd " << senderfd << std::endl;
-                        disconnectClient(pfds, pfd_i, clients, senderfd, "input frame limit exceeded", pfdMappings);
+                        std::cerr << "server: frame limit exceeded for fd " << incomingfd << std::endl;
+                        disconnectClient(epollfd, clients, incomingfd, "input buffer limit exceeded");
                         return;
                     }
                     break;
                 }
 
                 if (newline > MAX_FRAME_BYTES) {
-                    std::cerr << "server: frame limit exceeded for fd " << senderfd << std::endl;
-                    disconnectClient(pfds, pfd_i, clients, senderfd, "input frame limit exceeded", pfdMappings);
+                    std::cerr << "server: frame limit exceeded for fd " << incomingfd << std::endl;
+                    disconnectClient(epollfd, clients, incomingfd, "input buffer limit exceeded");
                     return;
                 }
 
@@ -313,13 +333,13 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
                     clientSender->clientState = CLIENT_ACTIVE;
                     joinChatRoom(clientSender, "main-room", *chatRooms);
                     std::string joinedMessage = "> server: " + clientSender->username + " joined room main-room\n";
-                    notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
+                    notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, epollfd, clients, *chatRooms);
 
-                    std::cout << "pollserver: user " << clientSender->username << " connected on socket " << senderfd << std::endl;
+                    std::cout << "pollserver: user " << clientSender->username << " connected on socket " << incomingfd << std::endl;
                     continue;
                 }
 
-                if (!processCommandFrame(listener, pfds, pfd_i, clients, chatRooms, clientSender, frame, pfdMappings)) {
+                if (!processCommandFrame(listener, epollfd, clients, chatRooms, clientSender, frame)) {
                     return;
                 }
 
@@ -332,10 +352,10 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
             std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
             int oldRoomIdx = clientSender->currRoom;
             std::string leftMessage = "> server: " + clientSender->username + " disconnected\n";
-            notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
-            removeClientFromRooms(senderfd, *chatRooms);
+            notifyRoomMembers(oldRoomIdx, incomingfd, leftMessage, epollfd, clients, *chatRooms);
+            removeClientFromRooms(incomingfd, *chatRooms);
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-            disconnectClient(pfds, pfd_i, clients, senderfd, "peer closed connection", pfdMappings);
+            disconnectClient(epollfd, clients, incomingfd, "peer closed connection");
             return;
         }
 
@@ -346,39 +366,45 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
         perror("recv");
         int oldRoomIdx = clientSender->currRoom;
         std::string leftMessage = "> server: " + clientSender->username + " disconnected\n";
-        notifyRoomMembers(oldRoomIdx, senderfd, leftMessage, listener, pfds, pfd_i, clients, *chatRooms, pfdMappings);
-        removeClientFromRooms(senderfd, *chatRooms);
+        notifyRoomMembers(oldRoomIdx, incomingfd, leftMessage, epollfd, clients, *chatRooms);
+        removeClientFromRooms(incomingfd, *chatRooms);
         checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-        disconnectClient(pfds, pfd_i, clients, senderfd, "recv failed", pfdMappings);
+        disconnectClient(epollfd, clients, incomingfd, "recv failed");
+
         return;
     }
 }
 
-void processExistingConnections(int listener, int epollfd,  std::vector<struct epoll_event> ready, int numReady, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms) {
+void processExistingConnections(int listener, int epollfd, std::vector<struct epoll_event> &ready, int numReady, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms) {
     for (int i = 0; i < numReady; i++) {
         int fd = ready[i].data.fd;
+        uint32_t flags = ready[i].events; // Bitmask representing the state of the epoll_event
 
         if (fd == listener) {
             // Allow a new incoming connection (generate a new pfd + ClientConnection)
-            handleConnection(listener, epollfd, clients);
+            if (flags & EPOLLIN) {
+                handleConnection(listener, epollfd, clients);
+            }
             continue;
         }
 
-        handleClients(listener, pfds, &i, clients, chatRooms, pfdMappings);
+        if (flags & (EPOLLIN | EPOLLHUP | EPOLLERR | EPOLLRDHUP)) {
+            handleClients(listener, fd, epollfd, clients, chatRooms);
+        }
 
-        if (i < 0 || i >= (int)pfds->size() || (*pfds)[i].fd != fd) {
+        if (i < 0 || i >= numReady || ready[i].data.fd != fd) {
             continue;
         }
 
-        if (revents & POLLOUT) {
+        if (flags & POLLOUT) {
             auto client = clients->find(fd);
-            if (client != clients->end() && !flushOutput(&(*pfds)[i], &client->second)) {
+            if (client != clients->end() && !flushOutput(epollfd, &client->second)) {
                 int oldRoomIdx = client->second.currRoom;
                 std::string leftMessage = "> server: " + client->second.username + " disconnected\n";
-                notifyRoomMembers(oldRoomIdx, fd, leftMessage, listener, pfds, &i, clients, *chatRooms, pfdMappings);
+                notifyRoomMembers(oldRoomIdx, fd, leftMessage, epollfd, clients, *chatRooms);
                 removeClientFromRooms(fd, *chatRooms);
                 checkDeleteChatRoom(oldRoomIdx, *chatRooms);
-                disconnectClient(pfds, &i, clients, fd, "send failed", pfdMappings);
+                disconnectClient(epollfd, clients, fd, "send failed");
             }
         }
     }
@@ -395,14 +421,18 @@ void createChatRoom(std::string roomName, std::vector<struct ChatRoom> *listOfRo
     listOfRooms->push_back(newRoom);
 }
 
-bool listChatRooms(struct pollfd *pfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms) {
+bool listChatRooms(int epollfd, ClientConnection *client, const std::vector<ChatRoom> &chatRooms) {
     std::string roomList = "+------+----------------+\n| ID   | Room           |\n+------+----------------+\n";
     for (const auto &room : chatRooms) {
         roomList += "| " + std::to_string(room.roomIdx) + "\t| " + room.roomName + "\n";
     }
     roomList += "+------+----------------+\n";
 
-    return queueOutput(pfd, client, roomList.data(), roomList.size());
+    struct epoll_event ev{};
+    ev.data.fd = client->fd;
+    ev.events = POLLIN;
+
+    return queueOutput(&ev, epollfd, client, roomList.data(), roomList.size());
 }
 
 void joinChatRoom(struct ClientConnection *client, std::string roomToJoin, std::vector<ChatRoom> &chatRooms) {
@@ -475,6 +505,6 @@ int main(void) {
             exit(1);
         }
 
-        processExistingConnections(listener, epollfd, &ready, readyfds, &clients, &chatRooms);
+        processExistingConnections(listener, epollfd, ready, readyfds, &clients, &chatRooms);
     }
 }
