@@ -1,0 +1,184 @@
+#include "server_epoll.hpp"
+
+#include <arpa/inet.h>
+#include <algorithm>
+#include <cerrno>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <fcntl.h>
+#include <iostream>
+#include <netdb.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/epoll.h>
+
+const char *inet_ntop2(void *addr, char *buf, size_t size) {
+    struct sockaddr_storage *sas = static_cast<sockaddr_storage *>(addr);
+    struct sockaddr_in *sa4;
+    struct sockaddr_in6 *sa6;
+    void *src;
+
+    switch (sas->ss_family) {
+        case AF_INET:
+            sa4 = static_cast<sockaddr_in *>(addr);
+            src = &(sa4->sin_addr);
+            break;
+
+        case AF_INET6:
+            sa6 = static_cast<sockaddr_in6 *>(addr);
+            src = &(sa6->sin6_addr);
+            break;
+
+        default:
+            return NULL;
+    }
+
+    return inet_ntop(sas->ss_family, src, buf, size);
+}
+
+int getListenerSocket(void) {
+    int listener;
+    int yes = 1;
+    int rv;
+
+    struct addrinfo hints, *ai, *p;
+
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+
+    const char *port = std::getenv("CHAT_SERVER_PORT");
+    if (port == nullptr || *port == '\0') {
+        port = PORT;
+    }
+
+    if ((rv = getaddrinfo(NULL, port, &hints, &ai)) != 0) {
+        std::cerr << "pollserver: " << gai_strerror(rv) << std::endl;
+        exit(1);
+    }
+
+    for (p = ai; p != NULL; p = p->ai_next) {
+        listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+
+        if (listener < 0) {
+            continue;
+        }
+
+        if (fcntl(listener, F_SETFL, O_NONBLOCK) == -1) {
+            close(listener);
+            continue;
+        }
+
+        setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+
+        if (bind(listener, p->ai_addr, p->ai_addrlen)) {
+            close(listener);
+            continue;
+        }
+
+        break;
+    }
+
+    if (p == NULL) {
+        return -1;
+    }
+
+    freeaddrinfo(ai);
+
+    if (listen(listener, QUEUE_LENGTH) == -1) {
+        close(listener);
+        return -1;
+    }
+
+    return listener;
+}
+
+// Swap-and-pop to remove the relevant PFD
+// void removePFD(std::vector<struct pollfd> *pfds, int i, int fdToRemove, std::map<int, int> *pfdMappings) {
+//     int movedFd = pfds->back().fd;
+//     (*pfds)[i] = pfds->back();
+//     pfds->pop_back();
+//     pfdMappings->erase(fdToRemove);
+
+//     // Update the moved PFD's entry in the PFD mapping object
+//     if (i < (int)pfds->size()) {
+//         (*pfdMappings)[movedFd] = i;
+//     }
+// }
+
+void disconnectClient(int epollfd, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection) {
+
+    size_t pendingBytes = 0;
+    size_t peakPendingBytes = 0;
+    std::string username;
+    auto client = clients->find(clientFd);
+    if (client != clients->end()) {
+        pendingBytes = client->second.outputQueueSize;
+        peakPendingBytes = client->second.peakPendingOutputBytes;
+        username = client->second.username;
+    }
+
+    if (epoll_ctl(epollfd, EPOLL_CTL_DEL, clientFd, nullptr) == -1) {
+        perror("disconnecting client");
+    }
+
+    close(clientFd);
+    clients->erase(clientFd);
+
+    std::cerr << "disconnect fd=" << clientFd
+              << " username=" << username
+              << " reason=" << reasonForDisconnection
+              << " pending=" << pendingBytes
+              << " peak=" << peakPendingBytes << std::endl;
+}
+
+bool queueOutput(struct epoll_event *ev, int epollfd, ClientConnection *client, const char *data, size_t numBytes) {
+    // Slow-client protection: reject an enqueue that would exceed this client's byte budget
+    if (client->outputQueueSize > MAX_PENDING_OUTPUT_BYTES ||
+        numBytes > MAX_PENDING_OUTPUT_BYTES - client->outputQueueSize) {
+        return false;
+    }
+
+    client->outputQueue.push_back({std::string(data, numBytes), 0});
+    client->outputQueueSize += numBytes;
+    client->peakPendingOutputBytes = std::max(client->peakPendingOutputBytes, client->outputQueueSize);
+    ev->events |= EPOLLOUT;
+
+    return epoll_ctl(epollfd, EPOLL_CTL_MOD, client->fd, ev) == 0;
+}
+
+bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
+    size_t bytesWritten = 0;
+    while (!client->outputQueue.empty() && bytesWritten < MAX_BYTES_WRITTEN_PER_POLL) {
+        PendingWrite &pending = client->outputQueue.front();
+        size_t bytesRemaining = pending.data.size() - pending.offset;
+        size_t writeBudget = MAX_BYTES_WRITTEN_PER_POLL - bytesWritten;
+        size_t bytesToSend = std::min(bytesRemaining, writeBudget);
+        ssize_t numBytes = send(client->fd, pending.data.data() + pending.offset, bytesToSend, MSG_NOSIGNAL);
+
+        if (numBytes > 0) {
+            pending.offset += numBytes;
+            client->outputQueueSize -= numBytes;
+            bytesWritten += numBytes;
+
+            if (pending.offset == pending.data.size()) {
+                client->outputQueue.pop_front();
+            }
+        } else if (numBytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            break;
+        } else {
+            perror("send");
+            return false;
+        }
+    }
+
+    if (client->outputQueue.empty()) {
+        pfd->events &= ~POLLOUT;
+    }
+
+    return true;
+}

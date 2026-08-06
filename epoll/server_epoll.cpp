@@ -1,4 +1,4 @@
-#include "server.hpp"
+#include "server_epoll.hpp"
 
 #include <arpa/inet.h>
 #include <algorithm>
@@ -16,6 +16,7 @@
 #include <sstream>
 #include <unordered_set>
 #include <cstring>
+#include <sys/epoll.h>
 
 static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "QUIT", "WHERE"};
 
@@ -95,35 +96,50 @@ ClientConnection packClientStruct(int fd, std::string username) {
 }
 
 // Steps for accepting a new incoming client
-void handleConnection(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients,  std::map<int, int> *pfdMappings) {
-    struct sockaddr_storage incomingAddr;
-    socklen_t addrlen = sizeof incomingAddr;
-    int incomingfd = accept(listener, (struct sockaddr *)&incomingAddr, &addrlen);
-    char remoteIP[INET6_ADDRSTRLEN];
+void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientConnection> *clients) {
+    while (true) {
+        struct sockaddr_storage incomingAddr;
+        socklen_t addrlen = sizeof incomingAddr;
+        int incomingfd = accept(listener, (struct sockaddr *)&incomingAddr, &addrlen);
+        char remoteIP[INET6_ADDRSTRLEN];
 
-    if (incomingfd == -1) {
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        if (incomingfd == -1) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
             perror("accept");
+            return;
         }
-        return;
-    }
 
-    // Set incoming client's fd to nonblocking to prevent the polling loop from continually circling around the same pfd
-    if (fcntl(incomingfd, F_SETFL, O_NONBLOCK) == -1) {
-        perror("fcntl");
-        close(incomingfd);
-        return;
-    }
+        // Set incoming client's fd to nonblocking to prevent the event loop from blocking on this socket.
+        if (fcntl(incomingfd, F_SETFL, O_NONBLOCK) == -1) {
+            perror("fcntl");
+            close(incomingfd);
+            continue;
+        }
 
-    addToPFDs(pfds, incomingfd, pfdMappings);
-    auto client = clients->emplace(incomingfd, packClientStruct(incomingfd, "")).first;
-    constexpr char usernamePrompt[] = "enter your username: ";
-    if (!queueOutput(&pfds->back(), &client->second, usernamePrompt, sizeof(usernamePrompt) - 1)) {
-        disconnectClient(pfds, nullptr, clients, incomingfd, "username prompt output queue overflow", pfdMappings);
-        return;
-    }
+        struct epoll_event ev{};
+        ev.data.fd = incomingfd;
+        ev.events = EPOLLIN;
+        if (epoll_ctl(epollfd, EPOLL_CTL_ADD, incomingfd, &ev) == -1) {
+            perror("epoll_ctl");
+            close(incomingfd);
+            continue;
+        }
 
-    std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << "; awaiting username" << std::endl;
+        auto client = clients->emplace(incomingfd, packClientStruct(incomingfd, "")).first;
+        constexpr char usernamePrompt[] = "enter your username: ";
+
+        if (!queueOutput(&ev, epollfd, &client->second, usernamePrompt, sizeof(usernamePrompt) - 1)) {
+            disconnectClient(epollfd, clients, incomingfd, "username prompt output queue overflow");
+            continue;
+        }
+
+        std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << "; awaiting username" << std::endl;
+    }
 }
 
 // 1 frame = 1 command delimited with '\n'
@@ -338,25 +354,20 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
     }
 }
 
-void processExistingConnections(int listener, std::vector<struct pollfd> *pfds, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms, std::map<int, int> *pfdMappings) {
-    for (int i = 0; i < (int)pfds->size(); i++) {
-        short revents = (*pfds)[i].revents;
-        int fd = (*pfds)[i].fd;
+void processExistingConnections(int listener, int epollfd,  std::vector<struct epoll_event> ready, int numReady, std::unordered_map<int, ClientConnection> *clients, std::vector<ChatRoom> *chatRooms) {
+    for (int i = 0; i < numReady; i++) {
+        int fd = ready[i].data.fd;
 
         if (fd == listener) {
-            if (revents & POLLIN) {
-                // Allow a new incoming connection (generate a new pfd + ClientConnection)
-                handleConnection(listener, pfds, clients, pfdMappings);
-            }
+            // Allow a new incoming connection (generate a new pfd + ClientConnection)
+            handleConnection(listener, epollfd, clients);
             continue;
         }
 
-        if (revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
-            handleClients(listener, pfds, &i, clients, chatRooms, pfdMappings);
+        handleClients(listener, pfds, &i, clients, chatRooms, pfdMappings);
 
-            if (i < 0 || i >= (int)pfds->size() || (*pfds)[i].fd != fd) {
-                continue;
-            }
+        if (i < 0 || i >= (int)pfds->size() || (*pfds)[i].fd != fd) {
+            continue;
         }
 
         if (revents & POLLOUT) {
@@ -433,24 +444,37 @@ int main(void) {
         exit(1);
     }
 
+    int epollfd = epoll_create1(0); // epoll_create1() is the newer version of epoll_create() that ignores the archaic size parameter
+    if (epollfd == -1) {
+        perror("epoll_create1");
+        exit(1);
+    }
+
+    struct epoll_event ev;
+    ev.data.fd = listener;
+    ev.events = EPOLLIN;
+    if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listener, &ev) == -1) {
+        perror("epoll_ctl");
+        exit(1);
+    }
+
     std::unordered_map<int, ClientConnection> clients;
-    std::vector<struct pollfd> pfds{{listener, POLLIN, 0}};
     std::vector<struct ChatRoom> chatRooms;
-    std::map<int, int> pfdMappings;
-    pfdMappings.insert(std::pair<int, int>{listener, 0});
+    std::vector<struct epoll_event> ready(MAX_EVENTS);
 
     createChatRoom("main-room", &chatRooms);
 
     puts("pollserver: waiting for connections...");
 
     while (true) {
-        int pollCount = poll(pfds.data(), pfds.size(), -1);
+        // Blocking until an event occurs for one of the file descriptors we're polling
+        int readyfds = epoll_wait(epollfd, ready.data(), MAX_EVENTS, -1);
 
-        if (pollCount == -1) {
-            perror("poll");
+        if (readyfds == -1) {
+            perror("epoll_wait");
             exit(1);
         }
 
-        processExistingConnections(listener, &pfds, &clients, &chatRooms, &pfdMappings);
+        processExistingConnections(listener, epollfd, &ready, readyfds, &clients, &chatRooms);
     }
 }
