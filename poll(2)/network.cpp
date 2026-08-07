@@ -147,47 +147,23 @@ void disconnectClient(std::vector<struct pollfd> *pfds, int *currentPfdIndex, st
 }
 
 bool queueOutput(struct pollfd *pfd, ClientConnection *client, const char *data, size_t numBytes) {
-    // Slow-client protection: reject an enqueue that would exceed this client's byte budget
-    if (client->outputQueueSize > MAX_PENDING_OUTPUT_BYTES ||
-        numBytes > MAX_PENDING_OUTPUT_BYTES - client->outputQueueSize) {
-        return false;
-    }
-
-    client->outputQueue.push_back({std::string(data, numBytes), 0});
-    client->outputQueueSize += numBytes;
-    client->peakPendingOutputBytes = std::max(client->peakPendingOutputBytes, client->outputQueueSize);
-    pfd->events |= POLLOUT;
-    return true;
+    return queueOutputCommon(client, data, numBytes, [pfd](bool interested) {
+        if (interested) {
+            pfd->events |= POLLOUT;
+        } else {
+            pfd->events &= ~POLLOUT;
+        }
+        return true;
+    });
 }
 
 bool flushOutput(struct pollfd *pfd, ClientConnection *client) {
-    size_t bytesWritten = 0;
-    while (!client->outputQueue.empty() && bytesWritten < MAX_BYTES_WRITTEN_PER_POLL) {
-        PendingWrite &pending = client->outputQueue.front();
-        size_t bytesRemaining = pending.data.size() - pending.offset;
-        size_t writeBudget = MAX_BYTES_WRITTEN_PER_POLL - bytesWritten;
-        size_t bytesToSend = std::min(bytesRemaining, writeBudget);
-        ssize_t numBytes = send(client->fd, pending.data.data() + pending.offset, bytesToSend, MSG_NOSIGNAL);
-
-        if (numBytes > 0) {
-            pending.offset += numBytes;
-            client->outputQueueSize -= numBytes;
-            bytesWritten += numBytes;
-
-            if (pending.offset == pending.data.size()) {
-                client->outputQueue.pop_front();
-            }
-        } else if (numBytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            break;
+    return flushOutputCommon(client, [pfd](bool interested) {
+        if (interested) {
+            pfd->events |= POLLOUT;
         } else {
-            perror("send");
-            return false;
+            pfd->events &= ~POLLOUT;
         }
-    }
-
-    if (client->outputQueue.empty()) {
-        pfd->events &= ~POLLOUT;
-    }
-
-    return true;
+        return true;
+    });
 }

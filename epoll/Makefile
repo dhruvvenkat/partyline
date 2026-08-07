@@ -20,14 +20,14 @@ benchmark: server
 benchmark-smoke: server
 	python3 ../bench/compare.py --implementations epoll --name epoll-smoke --tiers 10 --runs 1 --warmup 0.2 --duration 1 --drain 0.5
 
-server_asan: server_epoll.cpp network_epoll.cpp server_epoll.hpp Makefile
-	$(CXX) $(ASAN_FLAGS) server_epoll.cpp network_epoll.cpp -o server_asan
+server_asan: server_epoll.cpp network_epoll.cpp server_epoll.hpp ../common/server_common.cpp ../common/server_common.hpp Makefile
+	$(CXX) $(ASAN_FLAGS) server_epoll.cpp network_epoll.cpp ../common/server_common.cpp -o server_asan
 
-server_debug: server_epoll.cpp network_epoll.cpp server_epoll.hpp Makefile
-	$(CXX) $(DEBUG_FLAGS) server_epoll.cpp network_epoll.cpp -o server_debug
+server_debug: server_epoll.cpp network_epoll.cpp server_epoll.hpp ../common/server_common.cpp ../common/server_common.hpp Makefile
+	$(CXX) $(DEBUG_FLAGS) server_epoll.cpp network_epoll.cpp ../common/server_common.cpp -o server_debug
 
-server: server_epoll.cpp network_epoll.cpp server_epoll.hpp Makefile
-	$(CXX) $(RELEASE_FLAGS) server_epoll.cpp network_epoll.cpp -o server
+server: server_epoll.cpp network_epoll.cpp server_epoll.hpp ../common/server_common.cpp ../common/server_common.hpp Makefile
+	$(CXX) $(RELEASE_FLAGS) server_epoll.cpp network_epoll.cpp ../common/server_common.cpp -o server
 
 client: client_epoll.cpp Makefile
 	$(CXX) $(RELEASE_FLAGS) client_epoll.cpp -o client

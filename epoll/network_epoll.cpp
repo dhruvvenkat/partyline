@@ -222,6 +222,9 @@ void disconnectClient(int epollfd, std::unordered_map<int, ClientConnection> *cl
         username = client->second.username;
     }
 
+    if (serverMetrics().active) {
+        serverMetrics().epollCtlDel++;
+    }
     if (epoll_ctl(epollfd, EPOLL_CTL_DEL, clientFd, nullptr) == -1) {
         logNetworkError("epoll.delete_failed", errno, clientFd);
     }
@@ -250,6 +253,9 @@ bool setWriteInterest(int epollfd, int clientFd, bool interested) {
         ev.events |= EPOLLOUT;
     }
 
+    if (serverMetrics().active) {
+        serverMetrics().epollCtlMod++;
+    }
     if (epoll_ctl(epollfd, EPOLL_CTL_MOD, clientFd, &ev) != 0) {
         logNetworkError("epoll.modify_failed", errno, clientFd);
         return false;
@@ -262,70 +268,21 @@ bool setWriteInterest(int epollfd, int clientFd, bool interested) {
 }
 
 bool queueOutput(int epollfd, ClientConnection *client, const char *data, size_t numBytes) {
-    // Slow-client protection: reject an enqueue that would exceed this client's byte budget
-    if (client->outputQueueSize > MAX_PENDING_OUTPUT_BYTES ||
-        numBytes > MAX_PENDING_OUTPUT_BYTES - client->outputQueueSize) {
-        logNetwork(NetworkLogLevel::Warning, "socket.output_rejected",
-                   "fd=", client->fd,
-                   " bytes=", numBytes,
-                   " pending_bytes=", client->outputQueueSize,
-                   " limit_bytes=", MAX_PENDING_OUTPUT_BYTES);
-        return false;
+    bool queued = queueOutputCommon(client, data, numBytes, [&](bool interested) {
+        return setWriteInterest(epollfd, client->fd, interested);
+    });
+    if (!queued && errno != 0) {
+        logNetworkError("socket.output_failed", errno, client->fd);
     }
-
-    bool wasEmpty = client->outputQueue.empty();
-    client->outputQueue.push_back({std::string(data, numBytes), 0});
-    client->outputQueueSize += numBytes;
-    client->peakPendingOutputBytes = std::max(client->peakPendingOutputBytes, client->outputQueueSize);
-
-    if (wasEmpty && !setWriteInterest(epollfd, client->fd, true)) {
-        return false;
-    }
-
-    logNetwork(NetworkLogLevel::Debug, "socket.output_queued",
-               "fd=", client->fd,
-               " bytes=", numBytes,
-               " pending_bytes=", client->outputQueueSize,
-               " queue_depth=", client->outputQueue.size());
-
-    return true;
+    return queued;
 }
 
 bool flushOutput(int epollfd, ClientConnection *client) {
-    size_t bytesWritten = 0;
-    while (!client->outputQueue.empty() && bytesWritten < MAX_BYTES_WRITTEN_PER_POLL) {
-        PendingWrite &pending = client->outputQueue.front();
-        size_t bytesRemaining = pending.data.size() - pending.offset;
-        size_t writeBudget = MAX_BYTES_WRITTEN_PER_POLL - bytesWritten;
-        size_t bytesToSend = std::min(bytesRemaining, writeBudget);
-        ssize_t numBytes = send(client->fd, pending.data.data() + pending.offset, bytesToSend, MSG_NOSIGNAL);
-
-        if (numBytes > 0) {
-            pending.offset += numBytes;
-            client->outputQueueSize -= numBytes;
-            bytesWritten += numBytes;
-
-            if (pending.offset == pending.data.size()) {
-                client->outputQueue.pop_front();
-            }
-            logNetwork(NetworkLogLevel::Debug, "socket.sent",
-                       "fd=", client->fd,
-                       " bytes=", numBytes,
-                       " pending_bytes=", client->outputQueueSize);
-        } else if (numBytes == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            logNetwork(NetworkLogLevel::Debug, "socket.send_blocked",
-                       "fd=", client->fd,
-                       " pending_bytes=", client->outputQueueSize);
-            break;
-        } else {
-            logNetworkError("socket.send_failed", numBytes == 0 ? EPIPE : errno, client->fd);
-            return false;
-        }
+    bool flushed = flushOutputCommon(client, [&](bool interested) {
+        return setWriteInterest(epollfd, client->fd, interested);
+    });
+    if (!flushed) {
+        logNetworkError("socket.send_failed", errno, client->fd);
     }
-
-    if (client->outputQueue.empty()) {
-        return setWriteInterest(epollfd, client->fd, false);
-    }
-
-    return true;
+    return flushed;
 }

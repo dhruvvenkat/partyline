@@ -127,6 +127,9 @@ void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientC
         struct epoll_event ev{};
         ev.data.fd = incomingfd;
         ev.events = EPOLLIN;
+        if (serverMetrics().active) {
+            serverMetrics().epollCtlAdd++;
+        }
         if (epoll_ctl(epollfd, EPOLL_CTL_ADD, incomingfd, &ev) == -1) {
             int errorNumber = errno;
             logNetworkError("epoll.add_failed", errorNumber, incomingfd);
@@ -289,6 +292,8 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
 
     while (bytesRead < MAX_BYTES_READ_PER_POLL && framesProcessed < MAX_PROCESSED_FRAMES_PER_POLL) {
         ssize_t numBytes = recv(incomingfd, recvBuffer, sizeof recvBuffer, 0);
+        int receiveError = errno;
+        recordReceiveResult(numBytes, receiveError);
 
         if (numBytes > 0) {
             bytesRead += numBytes;
@@ -370,7 +375,7 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
             return;
         }
 
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        if (receiveError == EAGAIN || receiveError == EWOULDBLOCK || receiveError == EINTR) {
             return;
         }
 
@@ -478,6 +483,7 @@ void checkDeleteChatRoom(int roomIdToDelete, std::vector<ChatRoom> &chatRooms) {
 int main(void) {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
+    installMetricsSignalHandlers();
 
     int listener = getListenerSocket();
     if (listener == -1) {
@@ -511,22 +517,29 @@ int main(void) {
                " max_events=", MAX_EVENTS);
 
     while (shutdownSignal == 0) {
+        serviceMetricsSignals();
         // Blocking until an event occurs for one of the file descriptors we're polling
         int readyfds = epoll_wait(epollfd, ready.data(), MAX_EVENTS, -1);
 
         if (readyfds == -1) {
             if (errno == EINTR) {
+                serviceMetricsSignals();
                 continue;
             }
             logNetworkError("epoll.wait_failed", errno, epollfd);
             exit(1);
         }
 
+        serverMetrics().recordWait(static_cast<size_t>(readyfds), MAX_EVENTS);
+        beginServerIteration();
+
         logNetwork(NetworkLogLevel::Debug, "epoll.batch",
                    "ready=", readyfds, " clients=", clients.size());
 
         processExistingConnections(listener, epollfd, ready, readyfds, &clients, &chatRooms);
     }
+
+    serviceMetricsSignals();
 
     logNetwork(NetworkLogLevel::Info, "server.stopped",
                "signal=", shutdownSignal, " clients=", clients.size());

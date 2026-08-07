@@ -258,6 +258,8 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
 
     while (bytesRead < MAX_BYTES_READ_PER_POLL && framesProcessed < MAX_PROCESSED_FRAMES_PER_POLL) {
         ssize_t numBytes = recv(senderfd, recvBuffer, sizeof recvBuffer, 0);
+        int receiveError = errno;
+        recordReceiveResult(numBytes, receiveError);
 
         if (numBytes > 0) {
             bytesRead += numBytes;
@@ -323,7 +325,7 @@ void handleClients(int listener, std::vector<struct pollfd> *pfds, int *pfd_i, s
             return;
         }
 
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+        if (receiveError == EAGAIN || receiveError == EWOULDBLOCK || receiveError == EINTR) {
             return;
         }
 
@@ -426,6 +428,7 @@ void checkDeleteChatRoom(int roomIdToDelete, std::vector<ChatRoom> &chatRooms) {
 
 int main(void) {
     signal(SIGINT, signalHandler);
+    installMetricsSignalHandlers();
 
     int listener = getListenerSocket();
     if (listener == -1) {
@@ -444,12 +447,20 @@ int main(void) {
     puts("pollserver: waiting for connections...");
 
     while (true) {
+        serviceMetricsSignals();
         int pollCount = poll(pfds.data(), pfds.size(), -1);
 
         if (pollCount == -1) {
+            if (errno == EINTR) {
+                serviceMetricsSignals();
+                continue;
+            }
             perror("poll");
             exit(1);
         }
+
+        serverMetrics().recordWait(static_cast<size_t>(pollCount), pfds.size());
+        beginServerIteration();
 
         processExistingConnections(listener, &pfds, &clients, &chatRooms, &pfdMappings);
     }

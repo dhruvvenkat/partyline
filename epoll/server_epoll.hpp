@@ -1,9 +1,8 @@
 #pragma once
 
-#include <cstddef>
-#include <deque>
+#include "../common/server_common.hpp"
+
 #include <poll.h>
-#include <string>
 #include <sys/epoll.h>
 #include <unordered_map>
 #include <vector>
@@ -12,40 +11,7 @@
 #include <string_view>
 #include <utility>
 
-constexpr char PORT[] = "1234";
-constexpr int QUEUE_LENGTH = 10;
-constexpr int MAX_DATA_SIZE = 256;
-constexpr size_t MAX_FRAME_BYTES = 4096;
-constexpr size_t MAX_INPUT_BUFFER_BYTES = 8192;
-constexpr int CLIENT_AWAITING_USERNAME = 0;
-constexpr int CLIENT_ACTIVE = 1;
-constexpr size_t MAX_PENDING_OUTPUT_BYTES = 16384; // 16kb of pending output space for slow-client protection/backpressure
-constexpr size_t MAX_BYTES_READ_PER_POLL = 8192;
-constexpr size_t MAX_BYTES_WRITTEN_PER_POLL = 8192;
-constexpr size_t MAX_PROCESSED_FRAMES_PER_POLL = 32;
 constexpr int MAX_EVENTS = 64;
-
-struct PendingWrite {
-    std::string data;
-    size_t offset = 0;
-};
-
-struct ClientConnection {
-    int fd;
-    std::string username;
-    int currRoom;
-    std::string inputBuffer;
-    std::deque<PendingWrite> outputQueue;
-    size_t outputQueueSize;
-    size_t peakPendingOutputBytes;
-    int clientState;
-};
-
-struct ChatRoom {
-    int roomIdx; // number of the room
-    std::string roomName;
-    std::vector<int> subscribedClients; // list of all clients that are a member of the chatroom as file descriptors
-};
 
 enum class NetworkLogLevel { Debug, Info, Warning, Error, Off };
 
