@@ -1,6 +1,7 @@
 a.out
 server
 server_asan
+server_debug
 client
 info.md
 
