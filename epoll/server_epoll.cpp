@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
-#include <iostream>
 #include <netinet/in.h>
 #include <stdexcept>
 #include <sys/socket.h>
@@ -19,6 +18,7 @@
 #include <sys/epoll.h>
 
 static const std::unordered_set<std::string> reservedKeywords = {"LIST", "JOIN", "LEAVE", "QUIT", "WHERE"};
+static volatile std::sig_atomic_t shutdownSignal = 0;
 
 bool isReservedKeyword(std::string_view cmd) {
     return reservedKeywords.find(std::string(cmd)) != reservedKeywords.end();
@@ -83,13 +83,7 @@ static void notifyRoomMembers(int roomId, int excludedFd, const std::string &mes
 }
 
 void signalHandler(int sig) {
-    if (sig == SIGINT) {
-        std::cout << "\npollserver interrupted, shutting down..." << std::endl;
-        exit(sig);
-    }
-
-    std::cout << "Interrupt handle " << sig << std::endl;
-    exit(sig);
+    shutdownSignal = sig;
 }
 
 ClientConnection packClientStruct(int fd, std::string username) {
@@ -118,13 +112,14 @@ void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientC
             if (errno == EINTR) {
                 continue;
             }
-            perror("accept");
+            logNetworkError("socket.accept_failed", errno, listener);
             return;
         }
 
         // Set incoming client's fd to nonblocking to prevent the event loop from blocking on this socket.
         if (fcntl(incomingfd, F_SETFL, O_NONBLOCK) == -1) {
-            perror("fcntl");
+            int errorNumber = errno;
+            logNetworkError("socket.nonblocking_failed", errorNumber, incomingfd);
             close(incomingfd);
             continue;
         }
@@ -133,7 +128,8 @@ void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientC
         ev.data.fd = incomingfd;
         ev.events = EPOLLIN;
         if (epoll_ctl(epollfd, EPOLL_CTL_ADD, incomingfd, &ev) == -1) {
-            perror("epoll_ctl");
+            int errorNumber = errno;
+            logNetworkError("epoll.add_failed", errorNumber, incomingfd);
             close(incomingfd);
             continue;
         }
@@ -146,7 +142,11 @@ void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientC
             continue;
         }
 
-        std::cout << "pollserver: new connection from " << inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP) << " on socket " << incomingfd << "; awaiting username" << std::endl;
+        const char *remote = inet_ntop2(&incomingAddr, remoteIP, sizeof remoteIP);
+        logNetwork(NetworkLogLevel::Info, "client.accepted",
+                   "fd=", incomingfd,
+                   " remote=", networkLogValue(remote == nullptr ? "unknown" : remote),
+                   " clients=", clients->size());
     }
 }
 
@@ -159,10 +159,14 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
 
     std::vector<std::string> tokens;
     tokenizeBySpaces(command, tokens);
+    logNetwork(NetworkLogLevel::Debug, "frame.received",
+               "fd=", senderfd,
+               " bytes=", command.size(),
+               " type=", networkLogValue(
+                   !tokens.empty() && isReservedKeyword(tokens[0]) ? tokens[0] : "message"));
     if (!tokens.empty() && isReservedKeyword(tokens[0])) {
         // PARSE ONE OF THE RESERVED KEYWORDS
         if (tokens[0] == "LIST") {
-            //std::cout << "list picked" << std::endl;
             if (!listChatRooms(epollfd, clientSender, *chatRooms)) {
                 disconnectClient(epollfd, clients, senderfd, "slow client: LIST response output queue overflow");
 
@@ -171,7 +175,6 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
             return true;
 
         } else if (tokens[0] == "JOIN" && tokens.size() == 2) {
-            //std::cout << "join picked" << std::endl;
             int oldRoomIdx = clientSender->currRoom;
             std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
             if (oldRoomName != tokens[1]) {
@@ -186,7 +189,6 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
             checkDeleteChatRoom(oldRoomIdx, *chatRooms);
 
         } else if (tokens[0] == "LEAVE" && clientSender->currRoom != 0) {
-            //std::cout << "leave picked" << std::endl;
             int oldRoomIdx = clientSender->currRoom;
             std::string oldRoomName = roomNameForId(oldRoomIdx, *chatRooms);
             std::string leftMessage = "> server: " + clientSender->username + " left room " + oldRoomName + "\n";
@@ -231,7 +233,6 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
         }
         formattedOutboundMsg += "\n";
 
-        //std::cout << formattedOutboundMsg;
         // Since room deletion changes the indexes of the rooms themselves, we have to do a sweep before broadcasting to make sure we don't broadcast to the wrong room ID
         auto broadcastRoom = std::find_if(chatRooms->begin(), chatRooms->end(), [&](const ChatRoom &room) {
             return room.roomIdx == clientSender->currRoom;
@@ -240,6 +241,7 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
             return false;
         }
 
+        size_t recipients = 0;
         for (int destfd : broadcastRoom->subscribedClients) {
             if (destfd == listener || destfd == senderfd) {
                 continue;
@@ -258,7 +260,13 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
                 return false;
                 //j--; // Since disconnected client was swapped-and-poppped, we have to review the current slot again since it's populated with a new client
             }
+            recipients++;
         }
+        logNetwork(NetworkLogLevel::Debug, "chat.broadcast_queued",
+                   "fd=", senderfd,
+                   " room_id=", clientSender->currRoom,
+                   " bytes=", formattedOutboundMsg.size(),
+                   " recipients=", recipients);
     }
 
     return true;
@@ -271,7 +279,7 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
     try {
         clientSender = &clients->at(incomingfd);
     } catch (const std::out_of_range&) {
-        std::cerr << "server: sending client not found" << std::endl;
+        logNetwork(NetworkLogLevel::Warning, "client.event_stale", "fd=", incomingfd);
         return;
     }
 
@@ -285,10 +293,17 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
         if (numBytes > 0) {
             bytesRead += numBytes;
             clientSender->inputBuffer.append(recvBuffer, numBytes);
+            logNetwork(NetworkLogLevel::Debug, "socket.received",
+                       "fd=", incomingfd,
+                       " bytes=", numBytes,
+                       " buffered_bytes=", clientSender->inputBuffer.size());
 
             if (clientSender->inputBuffer.size() > MAX_INPUT_BUFFER_BYTES) {
                 // Slow-client protection
-                std::cerr << "server: input buffer limit exceeded for fd " << incomingfd << std::endl;
+                logNetwork(NetworkLogLevel::Warning, "socket.input_limit_exceeded",
+                           "fd=", incomingfd,
+                           " buffered_bytes=", clientSender->inputBuffer.size(),
+                           " limit_bytes=", MAX_INPUT_BUFFER_BYTES);
                 disconnectClient(epollfd, clients, incomingfd, "input buffer limit exceeded");
                 return;
             }
@@ -297,7 +312,10 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
                 size_t newline = clientSender->inputBuffer.find('\n');
                 if (newline == std::string::npos) {
                     if (clientSender->inputBuffer.size() > MAX_FRAME_BYTES) {
-                        std::cerr << "server: frame limit exceeded for fd " << incomingfd << std::endl;
+                        logNetwork(NetworkLogLevel::Warning, "frame.limit_exceeded",
+                                   "fd=", incomingfd,
+                                   " bytes=", clientSender->inputBuffer.size(),
+                                   " limit_bytes=", MAX_FRAME_BYTES);
                         disconnectClient(epollfd, clients, incomingfd, "input buffer limit exceeded");
                         return;
                     }
@@ -305,7 +323,10 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
                 }
 
                 if (newline > MAX_FRAME_BYTES) {
-                    std::cerr << "server: frame limit exceeded for fd " << incomingfd << std::endl;
+                    logNetwork(NetworkLogLevel::Warning, "frame.limit_exceeded",
+                               "fd=", incomingfd,
+                               " bytes=", newline,
+                               " limit_bytes=", MAX_FRAME_BYTES);
                     disconnectClient(epollfd, clients, incomingfd, "input buffer limit exceeded");
                     return;
                 }
@@ -323,7 +344,10 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
                     std::string joinedMessage = "> server: " + clientSender->username + " joined room main-room\n";
                     notifyRoomMembers(clientSender->currRoom, -1, joinedMessage, epollfd, clients, *chatRooms);
 
-                    std::cout << "pollserver: user " << clientSender->username << " connected on socket " << incomingfd << std::endl;
+                    logNetwork(NetworkLogLevel::Info, "client.authenticated",
+                               "fd=", incomingfd,
+                               " username=", networkLogValue(clientSender->username),
+                               " room_id=", clientSender->currRoom);
                     continue;
                 }
 
@@ -337,7 +361,6 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
         }
 
         if (numBytes == 0) {
-            std::cout << "pollserver: user " << clientSender->username << " hung up" << std::endl;
             int oldRoomIdx = clientSender->currRoom;
             std::string leftMessage = "> server: " + clientSender->username + " disconnected\n";
             notifyRoomMembers(oldRoomIdx, incomingfd, leftMessage, epollfd, clients, *chatRooms);
@@ -351,7 +374,8 @@ void handleClients(int listener, int incomingfd, int epollfd, std::unordered_map
             return;
         }
 
-        perror("recv");
+        int errorNumber = errno;
+        logNetworkError("socket.receive_failed", errorNumber, incomingfd);
         int oldRoomIdx = clientSender->currRoom;
         std::string leftMessage = "> server: " + clientSender->username + " disconnected\n";
         notifyRoomMembers(oldRoomIdx, incomingfd, leftMessage, epollfd, clients, *chatRooms);
@@ -367,6 +391,8 @@ void processExistingConnections(int listener, int epollfd, std::vector<struct ep
     for (int i = 0; i < numReady; i++) {
         int fd = ready[i].data.fd;
         uint32_t flags = ready[i].events; // Bitmask representing the state of the epoll_event
+        logNetwork(NetworkLogLevel::Debug, "epoll.event",
+                   "fd=", fd, " flags=", flags);
 
         if (fd == listener) {
             // Allow a new incoming connection (generate a new pfd + ClientConnection)
@@ -384,7 +410,7 @@ void processExistingConnections(int listener, int epollfd, std::vector<struct ep
             continue;
         }
 
-        if (flags & POLLOUT) {
+        if (flags & EPOLLOUT) {
             auto client = clients->find(fd);
             if (client != clients->end() && !flushOutput(epollfd, &client->second)) {
                 int oldRoomIdx = client->second.currRoom;
@@ -451,16 +477,17 @@ void checkDeleteChatRoom(int roomIdToDelete, std::vector<ChatRoom> &chatRooms) {
 
 int main(void) {
     signal(SIGINT, signalHandler);
+    signal(SIGTERM, signalHandler);
 
     int listener = getListenerSocket();
     if (listener == -1) {
-        std::cerr << "error getting listening socket" << std::endl;
+        logNetwork(NetworkLogLevel::Error, "server.listener_failed");
         exit(1);
     }
 
     int epollfd = epoll_create1(0); // epoll_create1() is the newer version of epoll_create() that ignores the archaic size parameter
     if (epollfd == -1) {
-        perror("epoll_create1");
+        logNetworkError("epoll.create_failed", errno);
         exit(1);
     }
 
@@ -468,7 +495,7 @@ int main(void) {
     ev.data.fd = listener;
     ev.events = EPOLLIN;
     if (epoll_ctl(epollfd, EPOLL_CTL_ADD, listener, &ev) == -1) {
-        perror("epoll_ctl");
+        logNetworkError("epoll.add_listener_failed", errno, listener);
         exit(1);
     }
 
@@ -478,17 +505,36 @@ int main(void) {
 
     createChatRoom("main-room", &chatRooms);
 
-    puts("pollserver: waiting for connections...");
+    logNetwork(NetworkLogLevel::Info, "server.started",
+               "listener_fd=", listener,
+               " epoll_fd=", epollfd,
+               " max_events=", MAX_EVENTS);
 
-    while (true) {
+    while (shutdownSignal == 0) {
         // Blocking until an event occurs for one of the file descriptors we're polling
         int readyfds = epoll_wait(epollfd, ready.data(), MAX_EVENTS, -1);
 
         if (readyfds == -1) {
-            perror("epoll_wait");
+            if (errno == EINTR) {
+                continue;
+            }
+            logNetworkError("epoll.wait_failed", errno, epollfd);
             exit(1);
         }
 
+        logNetwork(NetworkLogLevel::Debug, "epoll.batch",
+                   "ready=", readyfds, " clients=", clients.size());
+
         processExistingConnections(listener, epollfd, ready, readyfds, &clients, &chatRooms);
     }
+
+    logNetwork(NetworkLogLevel::Info, "server.stopped",
+               "signal=", shutdownSignal, " clients=", clients.size());
+    if (close(listener) == -1) {
+        logNetworkError("listener.close_failed", errno, listener);
+    }
+    if (close(epollfd) == -1) {
+        logNetworkError("epoll.close_failed", errno, epollfd);
+    }
+    return 0;
 }

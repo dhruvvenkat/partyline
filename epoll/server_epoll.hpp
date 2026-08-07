@@ -8,6 +8,9 @@
 #include <unordered_map>
 #include <vector>
 #include <map>
+#include <sstream>
+#include <string_view>
+#include <utility>
 
 constexpr char PORT[] = "1234";
 constexpr int QUEUE_LENGTH = 10;
@@ -43,6 +46,24 @@ struct ChatRoom {
     std::string roomName;
     std::vector<int> subscribedClients; // list of all clients that are a member of the chatroom as file descriptors
 };
+
+enum class NetworkLogLevel { Debug, Info, Warning, Error, Off };
+
+bool networkLogEnabled(NetworkLogLevel level);
+void writeNetworkLog(NetworkLogLevel level, std::string_view event, const std::string &details);
+std::string networkLogValue(std::string_view value);
+void logNetworkError(std::string_view event, int errorNumber, int fd = -1);
+
+template <typename... Values>
+void logNetwork(NetworkLogLevel level, std::string_view event, Values &&...values) {
+    if (!networkLogEnabled(level)) {
+        return;
+    }
+
+    std::ostringstream details;
+    ((details << std::forward<Values>(values)), ...);
+    writeNetworkLog(level, event, details.str());
+}
 
 void tokenizeBySpaces(const std::string &input, std::vector<std::string> &tokens);
 bool isReservedKeyword(std::string_view cmd);
