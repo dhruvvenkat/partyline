@@ -136,20 +136,37 @@ void disconnectClient(int epollfd, std::unordered_map<int, ClientConnection> *cl
               << " peak=" << peakPendingBytes << std::endl;
 }
 
-bool queueOutput(struct epoll_event *ev, int epollfd, ClientConnection *client, const char *data, size_t numBytes) {
+// Set write interest explicitly when an output queue switches from empty to partially/fully filled
+// This way, we don't unnecessarily call EPOLL_MOD when we don't need to
+bool setWriteInterest(int epollfd, int clientFd, bool interested) {
+    struct epoll_event ev{};
+    ev.data.fd = clientFd;
+    ev.events = EPOLLIN | EPOLLRDHUP;
+    if (interested) {
+        ev.events |= EPOLLOUT;
+    }
+
+    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, clientFd, &ev) != 0) {
+        perror("epoll_ctl MOD");
+        return false;
+    }
+
+    return true;
+}
+
+bool queueOutput(int epollfd, ClientConnection *client, const char *data, size_t numBytes) {
     // Slow-client protection: reject an enqueue that would exceed this client's byte budget
     if (client->outputQueueSize > MAX_PENDING_OUTPUT_BYTES ||
         numBytes > MAX_PENDING_OUTPUT_BYTES - client->outputQueueSize) {
         return false;
     }
 
+    bool wasEmpty = client->outputQueue.empty();
     client->outputQueue.push_back({std::string(data, numBytes), 0});
     client->outputQueueSize += numBytes;
     client->peakPendingOutputBytes = std::max(client->peakPendingOutputBytes, client->outputQueueSize);
-    ev->events |= EPOLLOUT;
 
-    if (epoll_ctl(epollfd, EPOLL_CTL_MOD, client->fd, ev) != 0) {
-        perror("epoll_ctl MOD");
+    if (wasEmpty && !setWriteInterest(epollfd, client->fd, true)) {
         return false;
     }
 
@@ -182,11 +199,7 @@ bool flushOutput(int epollfd, ClientConnection *client) {
     }
 
     if (client->outputQueue.empty()) {
-        struct epoll_event ev{};
-        ev.data.fd = client->fd;
-        ev.events = EPOLLIN | EPOLLRDHUP;
-
-        return epoll_ctl(epollfd, EPOLL_CTL_MOD, client->fd, &ev) == 0;
+        return setWriteInterest(epollfd, client->fd, false);
     }
 
     return true;

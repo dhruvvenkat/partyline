@@ -53,7 +53,8 @@ int getListenerSocket();
 void addToPFDs(std::vector<struct pollfd> *pfds, int newfd, std::map<int, int> *pfdMappings);
 void removePFD(std::vector<struct pollfd> *pfds, int i, std::map<int, int> *pfdMappings);
 void disconnectClient(int epollfd, std::unordered_map<int, ClientConnection> *clients, int clientFd, const std::string &reasonForDisconnection);
-bool queueOutput(struct epoll_event *ev, int epollfd, ClientConnection *client, const char *data, size_t numBytes);
+bool setWriteInterest(int epollfd, int clientFd, bool interested);
+bool queueOutput(int epollfd, ClientConnection *client, const char *data, size_t numBytes);
 bool flushOutput(int epollfd, ClientConnection *client);
 
 ClientConnection packClientStruct(int fd, std::string username);

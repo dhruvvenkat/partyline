@@ -73,11 +73,7 @@ static void notifyRoomMembers(int roomId, int excludedFd, const std::string &mes
             continue;
         }
 
-        struct epoll_event ev{};
-        ev.data.fd = destfd;
-        ev.events = EPOLLIN | EPOLLRDHUP;
-
-        if (!queueOutput(&ev, epollfd, &destClient->second, message.data(), message.size())) {
+        if (!queueOutput(epollfd, &destClient->second, message.data(), message.size())) {
             int oldRoomIdx = destClient->second.currRoom;
             removeClientFromRooms(destfd, chatRooms);
             disconnectClient(epollfd, clients, destfd, "slow client: room notification output queue overflow");
@@ -145,7 +141,7 @@ void handleConnection(int listener, int epollfd, std::unordered_map<int, ClientC
         auto client = clients->emplace(incomingfd, packClientStruct(incomingfd, "")).first;
         constexpr char usernamePrompt[] = "enter your username: ";
 
-        if (!queueOutput(&ev, epollfd, &client->second, usernamePrompt, sizeof(usernamePrompt) - 1)) {
+        if (!queueOutput(epollfd, &client->second, usernamePrompt, sizeof(usernamePrompt) - 1)) {
             disconnectClient(epollfd, clients, incomingfd, "username prompt output queue overflow");
             continue;
         }
@@ -209,11 +205,7 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
                 ? "> server: room not found\n"
                 : "> server: you are in room " + userRoom->roomName + "\n";
 
-            struct epoll_event ev{};
-            ev.data.fd = senderfd;
-            ev.events = POLLOUT;
-
-            if (!queueOutput(&ev, epollfd, clientSender, output.data(), output.size())) {
+            if (!queueOutput(epollfd, clientSender, output.data(), output.size())) {
                 int oldRoomIdx = clientSender->currRoom;
                 removeClientFromRooms(senderfd, *chatRooms);
                 disconnectClient(epollfd, clients, senderfd, "slow client: WHERE response output queue overflow");
@@ -258,11 +250,7 @@ static bool processCommandFrame(int listener, int epollfd, std::unordered_map<in
                 continue;
             }
 
-            struct epoll_event ev{};
-            ev.data.fd = destfd;
-            ev.events = POLLIN;
-
-            if (!queueOutput(&ev, epollfd, &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size())) {
+            if (!queueOutput(epollfd, &destClient->second, formattedOutboundMsg.data(), formattedOutboundMsg.size())) {
                 int oldRoomIdx = destClient->second.currRoom;
                 removeClientFromRooms(destfd, *chatRooms);
                 disconnectClient(epollfd, clients, destfd, "slow client: chat message output queue overflow");
@@ -428,11 +416,7 @@ bool listChatRooms(int epollfd, ClientConnection *client, const std::vector<Chat
     }
     roomList += "+------+----------------+\n";
 
-    struct epoll_event ev{};
-    ev.data.fd = client->fd;
-    ev.events = POLLIN;
-
-    return queueOutput(&ev, epollfd, client, roomList.data(), roomList.size());
+    return queueOutput(epollfd, client, roomList.data(), roomList.size());
 }
 
 void joinChatRoom(struct ClientConnection *client, std::string roomToJoin, std::vector<ChatRoom> &chatRooms) {
