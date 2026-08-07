@@ -1,4 +1,4 @@
-# Partyline: An experiment in Linux I/O evolution
+# Partyline: An experiment in Linux I/O polling evolution
 
 Partyline is a Linux-native TCP chatroom-style server implemented using 3 different methods of I/O polling:
  - poll(2): The original polling method, uses O(N) scans over all socket connections to see which ones have incoming/outgoing messages
