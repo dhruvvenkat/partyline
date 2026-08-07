@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Loopback scale benchmark for the poll-based chat server."""
+"""Multithreaded loopback scale benchmark for the chat server."""
 
 import argparse
 import csv
@@ -11,8 +11,10 @@ import socket
 import statistics
 import subprocess
 import tempfile
+import threading
 import time
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -73,15 +75,20 @@ def connect_clients(port, count):
         sock.sendall(f"bench-{index}\n".encode())
         sock.setblocking(False)
         clients.append(
-            {"sock": sock, "buffer": b"", "pending": deque(), "closed": False}
+            {
+                "index": index,
+                "sock": sock,
+                "buffer": b"",
+                "pending": deque(),
+                "closed": False,
+            }
         )
     return clients
 
 
-def process_reads(selector, clients, state, events):
+def process_reads(selector, state, events):
     for key, _ in events:
-        index = key.data
-        client = clients[index]
+        client = key.data
         while True:
             try:
                 data = client["sock"].recv(65536)
@@ -93,7 +100,7 @@ def process_reads(selector, clients, state, events):
             if not data:
                 if not client["closed"]:
                     client["closed"] = True
-                    state["disconnects"].add(index)
+                    state["disconnects"].add(client["index"])
                     selector.unregister(client["sock"])
                 break
 
@@ -105,7 +112,7 @@ def process_reads(selector, clients, state, events):
                 state["deliveries"] += delivered
                 if by_deadline:
                     state["deliveries_by_deadline"] += delivered
-                if index != state["observer"]:
+                if client["index"] != state["observer"]:
                     continue
 
             client["buffer"] += data
@@ -143,10 +150,10 @@ def process_reads(selector, clients, state, events):
                 )
 
 
-def wait_for_events(selector, clients, state, timeout):
+def wait_for_events(selector, state, timeout):
     events = selector.select(timeout)
     if events:
-        process_reads(selector, clients, state, events)
+        process_reads(selector, state, events)
 
 
 def settle(selector, clients, max_wait=5.0, quiet=0.1):
@@ -158,7 +165,7 @@ def settle(selector, clients, max_wait=5.0, quiet=0.1):
             continue
         last_data = time.monotonic()
         for key, _ in events:
-            client = clients[key.data]
+            client = key.data
             while True:
                 try:
                     data = client["sock"].recv(65536)
@@ -181,23 +188,46 @@ def server_cpu_seconds(pid):
         return None
 
 
-def run_phase(selector, clients, workload, rate, duration, payload_size, token):
-    participant_count = len(clients) if workload == "direct" else len(clients) - 1
+def run_phase(
+    selector,
+    clients,
+    workload,
+    rate,
+    duration,
+    payload_size,
+    token,
+    total_clients,
+    observer,
+    barrier,
+    shared_start,
+):
+    participant_count = total_clients if workload == "direct" else total_clients - 1
     if participant_count < 1:
         raise ValueError("broadcast workload needs at least two clients")
 
-    start = time.monotonic()
+    barrier.wait()
+    start = shared_start[0]
     deadline = start + duration
     period = 1.0 / rate
+    participants = (
+        clients
+        if workload == "direct"
+        else [client for client in clients if client["index"] != observer]
+    )
     schedule = [
-        (start + index * period / participant_count, index, 0)
-        for index in range(participant_count)
+        (
+            start + client["index"] * period / participant_count,
+            client["index"],
+            0,
+            client,
+        )
+        for client in participants
     ]
     heapq.heapify(schedule)
     state = {
         "workload": workload,
         "token": token,
-        "observer": len(clients) - 1,
+        "observer": observer,
         "deadline_ns": int(deadline * 1_000_000_000),
         "offered": 0,
         "completed": 0,
@@ -217,10 +247,9 @@ def run_phase(selector, clients, workload, rate, duration, payload_size, token):
             break
 
         while schedule and schedule[0][0] <= now:
-            scheduled, index, sequence = heapq.heappop(schedule)
+            scheduled, index, sequence, client = heapq.heappop(schedule)
             if scheduled >= deadline:
                 continue
-            client = clients[index]
             sent_ns = time.monotonic_ns()
             if workload == "direct":
                 frame = b"WHERE\n"
@@ -247,29 +276,96 @@ def run_phase(selector, clients, workload, rate, duration, payload_size, token):
                 if workload == "direct":
                     client["pending"].append(sent_ns)
 
-            heapq.heappush(schedule, (scheduled + period, index, sequence + 1))
+            heapq.heappush(
+                schedule, (scheduled + period, index, sequence + 1, client)
+            )
             now = time.monotonic()
 
         next_send = schedule[0][0] if schedule else deadline
         wait_for_events(
-            selector,
-            clients,
-            state,
-            max(0.0, min(0.05, next_send - now, deadline - now)),
+            selector, state, max(0.0, min(0.05, next_send - now, deadline - now))
         )
 
     return state
 
 
-def drain_phase(selector, clients, state, max_wait):
+def drain_phase(selector, state, max_wait):
     deadline = time.monotonic() + max_wait
     quiet_since = time.monotonic()
     previous_deliveries = state["deliveries"]
     while time.monotonic() < deadline and time.monotonic() - quiet_since < 0.1:
-        wait_for_events(selector, clients, state, 0.05)
+        wait_for_events(selector, state, 0.05)
         if state["deliveries"] != previous_deliveries:
             previous_deliveries = state["deliveries"]
             quiet_since = time.monotonic()
+
+
+def partition_clients(clients, worker_count):
+    return [clients[offset::worker_count] for offset in range(worker_count)]
+
+
+def run_parallel_phase(
+    executor, workers, workload, args, duration, token, total_clients
+):
+    shared_start = []
+    barrier = threading.Barrier(
+        len(workers), action=lambda: shared_start.append(time.monotonic())
+    )
+    observer = total_clients - 1
+    futures = [
+        executor.submit(
+            run_phase,
+            selector,
+            worker_clients,
+            workload,
+            args.rate,
+            duration,
+            args.payload_size,
+            token,
+            total_clients,
+            observer,
+            barrier,
+            shared_start,
+        )
+        for selector, worker_clients in workers
+    ]
+    return [future.result() for future in futures]
+
+
+def drain_parallel(executor, workers, states, max_wait):
+    futures = [
+        executor.submit(drain_phase, selector, state, max_wait)
+        for (selector, _), state in zip(workers, states)
+    ]
+    for future in futures:
+        future.result()
+
+
+def merge_states(states):
+    merged = states[0].copy()
+    for key in (
+        "offered",
+        "completed",
+        "completed_by_deadline",
+        "deliveries",
+        "deliveries_by_deadline",
+        "send_errors",
+    ):
+        merged[key] = sum(state[key] for state in states)
+    merged["latencies_ms"] = [
+        value for state in states for value in state["latencies_ms"]
+    ]
+    merged["scheduler_lag_ms"] = [
+        value for state in states for value in state["scheduler_lag_ms"]
+    ]
+    merged["disconnects"] = set().union(
+        *(state["disconnects"] for state in states)
+    )
+    return merged
+
+
+def is_disconnect_log(line):
+    return line.startswith("disconnect ") or " event=client.disconnected " in line
 
 
 def run_trial(server_path, label, workload, client_count, run, args):
@@ -284,50 +380,64 @@ def run_trial(server_path, label, workload, client_count, run, args):
         stdout=subprocess.DEVNULL,
         stderr=log,
     )
-    selector = selectors.DefaultSelector()
+    setup_selector = selectors.DefaultSelector()
+    workers = []
     clients = []
     state = None
 
     try:
         clients = connect_clients(port, client_count)
-        for index, client in enumerate(clients):
-            selector.register(client["sock"], selectors.EVENT_READ, index)
-        settle(selector, clients)
+        for client in clients:
+            setup_selector.register(client["sock"], selectors.EVENT_READ, client)
+        settle(setup_selector, clients)
+        setup_selector.close()
 
-        if args.warmup:
-            warmup = run_phase(
-                selector,
-                clients,
-                workload,
-                args.rate,
-                args.warmup,
-                args.payload_size,
-                b"warmup",
-            )
-            drain_phase(selector, clients, warmup, args.drain)
-            if warmup["disconnects"] or warmup["send_errors"]:
-                raise RuntimeError(
-                    "client failure during warmup: "
-                    f"disconnects={sorted(warmup['disconnects'])} "
-                    f"send_errors={warmup['send_errors']}"
+        worker_count = min(client_count, args.workers)
+        for worker_clients in partition_clients(clients, worker_count):
+            selector = selectors.DefaultSelector()
+            for client in worker_clients:
+                selector.register(client["sock"], selectors.EVENT_READ, client)
+            workers.append((selector, worker_clients))
+
+        with ThreadPoolExecutor(
+            max_workers=worker_count, thread_name_prefix="benchmark"
+        ) as executor:
+            if args.warmup:
+                warmup_states = run_parallel_phase(
+                    executor,
+                    workers,
+                    workload,
+                    args,
+                    args.warmup,
+                    b"warmup",
+                    client_count,
                 )
-            if workload == "direct" and any(c["pending"] for c in clients):
-                raise RuntimeError("direct responses remained pending after warmup")
-            for client in clients:
-                client["buffer"] = b""
+                drain_parallel(executor, workers, warmup_states, args.drain)
+                warmup = merge_states(warmup_states)
+                if warmup["disconnects"] or warmup["send_errors"]:
+                    raise RuntimeError(
+                        "client failure during warmup: "
+                        f"disconnects={sorted(warmup['disconnects'])} "
+                        f"send_errors={warmup['send_errors']}"
+                    )
+                if workload == "direct" and any(c["pending"] for c in clients):
+                    raise RuntimeError("direct responses remained pending after warmup")
+                for client in clients:
+                    client["buffer"] = b""
 
-        cpu_start = server_cpu_seconds(server.pid)
-        state = run_phase(
-            selector,
-            clients,
-            workload,
-            args.rate,
-            args.duration,
-            args.payload_size,
-            f"{client_count}-{run}".encode(),
-        )
-        cpu_end = server_cpu_seconds(server.pid)
-        drain_phase(selector, clients, state, args.drain)
+            cpu_start = server_cpu_seconds(server.pid)
+            states = run_parallel_phase(
+                executor,
+                workers,
+                workload,
+                args,
+                args.duration,
+                f"{client_count}-{run}".encode(),
+                client_count,
+            )
+            cpu_end = server_cpu_seconds(server.pid)
+            drain_parallel(executor, workers, states, args.drain)
+            state = merge_states(states)
 
         expected_deliveries = state["offered"] * (
             client_count - 1 if workload == "broadcast" else 1
@@ -344,6 +454,7 @@ def run_trial(server_path, label, workload, client_count, run, args):
             "server": str(server_path),
             "workload": workload,
             "clients": client_count,
+            "load_workers": worker_count,
             "run": run,
             "duration_s": args.duration,
             "rate_per_client_s": args.rate,
@@ -385,11 +496,13 @@ def run_trial(server_path, label, workload, client_count, run, args):
                 server.wait()
         for client in clients:
             client["sock"].close()
-        selector.close()
+        setup_selector.close()
+        for selector, _ in workers:
+            selector.close()
 
     log.seek(0)
     disconnect_reasons = [
-        line.strip() for line in log if line.startswith("disconnect ")
+        line.strip() for line in log if is_disconnect_log(line)
     ]
     log.close()
     result["disconnect_reasons"] = " | ".join(disconnect_reasons)
@@ -403,6 +516,7 @@ def display(value, unit=""):
 def print_result(row):
     print(
         f"{row['workload']:9} clients={row['clients']:4} run={row['run']} "
+        f"workers={row['load_workers']:2} "
         f"offered={row['offered_msg_s']:.1f}/s "
         f"completed={row['completed_by_deadline_msg_s']:.1f}/s "
         f"delivered={row['delivered_by_deadline_msg_s']:.1f}/s "
@@ -468,6 +582,12 @@ def main():
     parser.add_argument("--drain", type=float, default=2.0)
     parser.add_argument("--rate", type=float, default=3.0)
     parser.add_argument("--payload-size", type=int, default=128)
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=2,
+        help="load-generator threads (default: 2)",
+    )
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -482,10 +602,13 @@ def main():
         parser.error("runs, duration, rate, and drain must be positive")
     if args.warmup < 0 or not 0 <= args.payload_size <= 4000:
         parser.error("warmup and payload size are out of range")
+    if args.workers is not None and args.workers < 1:
+        parser.error("workers must be positive")
     print(
         f"server={server_path} label={args.label} "
         f"system={platform.system()} {platform.release()} "
-        f"python={platform.python_version()} selector={selectors.DefaultSelector.__name__}",
+        f"python={platform.python_version()} selector={selectors.DefaultSelector.__name__} "
+        f"workers={args.workers}",
         flush=True,
     )
     rows = []

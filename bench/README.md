@@ -17,6 +17,10 @@ and writes one CSV row per trial.
 rate-limits clients, so the saturation baseline uses the highest sustained
 rate found for each tier without disconnects, send errors, or delivery loss.
 
+The load generator partitions clients across worker threads, each with its own
+selector and send schedule. It defaults to two workers; larger counts contend
+on Python's GIL at this workload. Use `--workers N` to override that choice.
+
 ## Baseline
 
 Run `make benchmark`. It performs three 10-second trials at each load and
@@ -53,6 +57,9 @@ relative to the latency being compared. Keep the machine, kernel, compiler
 flags, payload, rates, and client harness unchanged.
 
 ## Unrestricted `poll()` saturation baseline: 2026-07-31
+
+These historical numbers used the old single-threaded load generator. Rerun
+both servers with the threaded harness before making implementation comparisons.
 
 Measured on Linux 7.0.0-28-generic, Intel Core i5-1350P (12 cores/16 logical
 CPUs), GCC 13.3, and Python 3.13.3. The server used the project's current
