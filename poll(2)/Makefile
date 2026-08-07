@@ -20,14 +20,17 @@ benchmark: server
 benchmark-smoke: server
 	python3 ../bench/compare.py --implementations poll --name poll-smoke --tiers 10 --runs 1 --warmup 0.2 --duration 1 --drain 0.5
 
-server_asan: server.cpp network.cpp server.hpp ../common/server_common.cpp ../common/server_common.hpp Makefile
-	$(CXX) $(ASAN_FLAGS) server.cpp network.cpp ../common/server_common.cpp -o server_asan
+SERVER_SOURCES := poll_dispatcher.cpp ../common/chat_server.cpp ../common/server_common.cpp
+SERVER_HEADERS := ../common/chat_server.hpp ../common/server_common.hpp
 
-server_debug: server.cpp network.cpp server.hpp ../common/server_common.cpp ../common/server_common.hpp Makefile
-	$(CXX) $(DEBUG_FLAGS) server.cpp network.cpp ../common/server_common.cpp -o server_debug
+server_asan: $(SERVER_SOURCES) $(SERVER_HEADERS) Makefile
+	$(CXX) $(ASAN_FLAGS) $(SERVER_SOURCES) -o server_asan
 
-server: server.cpp network.cpp server.hpp ../common/server_common.cpp ../common/server_common.hpp Makefile
-	$(CXX) $(RELEASE_FLAGS) server.cpp network.cpp ../common/server_common.cpp -o server
+server_debug: $(SERVER_SOURCES) $(SERVER_HEADERS) Makefile
+	$(CXX) $(DEBUG_FLAGS) $(SERVER_SOURCES) -o server_debug
+
+server: $(SERVER_SOURCES) $(SERVER_HEADERS) Makefile
+	$(CXX) $(RELEASE_FLAGS) $(SERVER_SOURCES) -o server
 
 client: client.cpp Makefile
 	$(CXX) $(RELEASE_FLAGS) client.cpp -o client

@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER = ROOT / "server"
+SERVER = ROOT / "epoll" / "server"
 HOST = "127.0.0.1"
 
 
@@ -51,12 +51,13 @@ def wait_for_close(sock, timeout=2.0):
 class ChatServerTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        subprocess.run(["make", "-B", "server"], cwd=ROOT, check=True)
+        subprocess.run(["make", "release"], cwd=ROOT, check=True)
 
     def setUp(self):
         self.port = find_free_port()
         environment = os.environ.copy()
         environment["CHAT_SERVER_PORT"] = str(self.port)
+        environment["CHAT_LOG_LEVEL"] = "off"
         self.server = subprocess.Popen(
             [str(SERVER)],
             cwd=ROOT,
