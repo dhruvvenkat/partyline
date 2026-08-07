@@ -1,18 +1,18 @@
-# Partyline: An Event-Driven TCP Chat Server
+# Partyline: An experiment in Linux I/O evolution
 
-A C++ TCP chat server built around a single `poll()` event loop. It accepts multiple clients, tracks per-client state, and broadcasts messages without dedicating a thread to each connection.
+Partyline is a Linux-native TCP chatroom-style server implemented using 3 different methods of I/O polling:
+ - poll(2): The original polling method, uses O(N) scans over all socket connections to see which ones have incoming/outgoing messages
+ - epoll(7): A more advanced polling method that returns a list of only the socket connections that have pending I/O operations in batches from the kernel
+ - io_uring: A recent addition to the Linux kernel that uses a pair of circular buffers to continuously pass I/O-pending socket connections from the kernel to the application
 
-The project is being developed toward a nonblocking, backpressure-aware server that remains responsive when clients are slow or stop reading.
+## Base features
+Each version of the chat server keeps these features as a control; the only thing that changes between each implementation is the I/O polling method:
+ - Single-threadedness to force concurrency to come from readiness multiplexing
+ - Partial reads and writes handled via nonblocking sockets to prevent the server from getting clogged up by high-latency requests
+ - Newline-delimited message frames for clear separation of client messages
+ - Hard limits to the number of frames and bytes that can be processed from one socket connection to prevent spam from hammering the server
+ - Per-client bounded outbound queue that disconnects the client on overflow; the queue is drained as bytes are written to the on-server buffer
+ - Client-created and joinable rooms
+ - Room-scoped message broadcast to restrict messages to those in the same room as the sender
 
-## Roadmap
-
-- Per-client state, usernames, rooms, input buffers, and output queues
-- Nonblocking sockets and event-driven username handling
-- Newline-delimited commands such as `NAME`, `JOIN`, `LEAVE`, `MSG`, and `QUIT`
-- Room-based broadcasting
-- Partial-write handling with bounded pending output queues
-- Slow-client protection and event-loop fairness
-- Metrics, stress testing, and required edge-case tests
-- Optional `epoll` support after the `poll()` implementation is complete
-
-The implementation goal is a single event-loop thread that handles fragmented messages, partial writes, slow clients, and clean connection shutdown without allowing one client to stall the server.
+See the README file in `bench/` for specifics on the experiment.
