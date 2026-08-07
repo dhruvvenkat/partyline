@@ -11,7 +11,7 @@
 #include <string_view>
 #include <utility>
 
-constexpr int MAX_EVENTS = 64;
+constexpr int MAX_EVENTS = 4096;
 
 enum class NetworkLogLevel { Debug, Info, Warning, Error, Off };
 
