@@ -608,7 +608,7 @@ def phase_config(args, workload, total_connections, active_connections, duration
 
 
 def configured_warmup_rate(args):
-    return args.warmup_rate if args.warmup_rate is not None else min(args.rate, 1000.0)
+    return min(args.rate, args.warmup_rate if args.warmup_rate is not None else 1000.0)
 
 
 def run_worker_phase(controls, phase):

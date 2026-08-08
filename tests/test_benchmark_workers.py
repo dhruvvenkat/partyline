@@ -72,6 +72,8 @@ class BenchmarkWorkerTests(unittest.TestCase):
         self.assertEqual(configured_warmup_rate(args), 1000)
         args.warmup_rate = 500
         self.assertEqual(configured_warmup_rate(args), 500)
+        args.rate = 100
+        self.assertEqual(configured_warmup_rate(args), 100)
 
     def test_ready_clients_rotate_fairly(self):
         events = [(index, selectors.EVENT_READ) for index in range(3)]
