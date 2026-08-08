@@ -772,7 +772,7 @@ def run_trial(server_path, label, workload, total_connections, active_connection
         "worker_affinity_applied": bool(worker_setup) and all(
             message["affinity_applied"] for message in worker_setup
         ) if args.worker_cpus else False,
-        "run": run,
+        "run": args.trial_id + run - 1,
         "duration_s": args.duration,
         "global_offered_rate_s": args.rate,
         "payload_bytes": args.payload_size if workload == "broadcast" else 0,
@@ -959,6 +959,7 @@ def main():
     parser.add_argument("--active-connections", type=int)
     parser.add_argument("--workloads", type=csv_values, default=["direct"])
     parser.add_argument("--runs", type=int, default=1)
+    parser.add_argument("--trial-id", type=int, default=1)
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--warmup", type=float, default=1.0)
     parser.add_argument("--drain", type=float, default=2.0)

@@ -245,13 +245,14 @@ def write_summaries(rows, result_directory, runs):
     return summary
 
 
-def benchmark_command(args, group, rate, label, output):
+def benchmark_command(args, group, rate, label, output, trial=1):
     command = [
         sys.executable, str(ROOT / "bench" / "benchmark.py"),
         "--server", str(SERVERS[label]), "--label", label,
         "--experiment", group["experiment"], "--tiers", str(group["total"]),
         "--active-connections", str(group["active"]),
         "--workloads", group["workload"], "--rate", str(rate), "--runs", "1",
+        "--trial-id", str(trial),
         "--duration", str(args.duration), "--warmup", str(args.warmup),
         "--drain", str(args.drain), "--payload-size", str(args.payload_size),
         "--workers", str(args.workers),
@@ -346,7 +347,7 @@ def main():
                             f"trial-{trial:02d}-{group['experiment']}-t{group['total']}-"
                             f"a{group['active']}-r{rate_tag}-{label}.csv"
                         )
-                        command = benchmark_command(args, group, rate, label, output)
+                        command = benchmark_command(args, group, rate, label, output, trial)
                         record = {
                             "trial": trial, "implementation": label,
                             "server": str(SERVERS[label]), "experiment": group["experiment"],
