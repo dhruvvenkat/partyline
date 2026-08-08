@@ -28,6 +28,6 @@ The other directories are retained because results are never overwritten:
   `20260808T002727Z-diagnostic-strace-epoll-de2bcb3` record local profiling
   permission failures. Diagnostic runs are never eligible for latency claims.
 
-Use each directory's `metadata.json`, `summary.json`,
+For completed comparisons, use `metadata.json`, `summary.json`,
 `headline-valid-medians.csv`, and `invalid-trials.csv` together. Headline rows
 contain valid trials only.

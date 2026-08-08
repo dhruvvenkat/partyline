@@ -71,6 +71,12 @@ traffic. Active clients issue direct `WHERE` requests at one fixed global
 offered rate. The default totals are 1K, 5K, 10K, and 50K, with 1, 10, and 100
 active clients where possible.
 
+For localhost tests, verify `/proc/sys/net/ipv4/ip_local_port_range` before a
+large tier. One connection consumes one client source port, so a 50K tier
+requires at least 50K usable source tuples; lower the tier or run the generator
+from additional hosts when the local range is smaller. Do not change
+machine-wide networking settings just for a benchmark.
+
 Headline fields include CPU per completed request, p50/p95/p99 latency, wait
 calls, events per wait, full event batches, `epoll_ctl` calls, and generator
 validity.
