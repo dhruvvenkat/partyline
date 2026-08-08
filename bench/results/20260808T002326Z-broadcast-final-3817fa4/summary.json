@@ -1,0 +1,30 @@
+{
+  "valid_trials": 32,
+  "invalid_trials": 0,
+  "highest_sustainable": [
+    {
+      "experiment": "broadcast",
+      "label": "epoll",
+      "total_connections": 10,
+      "highest_sustainable_valid_rate": 5000.0
+    },
+    {
+      "experiment": "broadcast",
+      "label": "epoll",
+      "total_connections": 100,
+      "highest_sustainable_valid_rate": 5000.0
+    },
+    {
+      "experiment": "broadcast",
+      "label": "poll",
+      "total_connections": 10,
+      "highest_sustainable_valid_rate": 5000.0
+    },
+    {
+      "experiment": "broadcast",
+      "label": "poll",
+      "total_connections": 100,
+      "highest_sustainable_valid_rate": 5000.0
+    }
+  ]
+}

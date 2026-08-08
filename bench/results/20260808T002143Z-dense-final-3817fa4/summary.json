@@ -1,0 +1,30 @@
+{
+  "valid_trials": 40,
+  "invalid_trials": 0,
+  "highest_sustainable": [
+    {
+      "experiment": "dense",
+      "label": "epoll",
+      "total_connections": 100,
+      "highest_sustainable_valid_rate": 50000.0
+    },
+    {
+      "experiment": "dense",
+      "label": "epoll",
+      "total_connections": 500,
+      "highest_sustainable_valid_rate": 50000.0
+    },
+    {
+      "experiment": "dense",
+      "label": "poll",
+      "total_connections": 100,
+      "highest_sustainable_valid_rate": 50000.0
+    },
+    {
+      "experiment": "dense",
+      "label": "poll",
+      "total_connections": 500,
+      "highest_sustainable_valid_rate": 50000.0
+    }
+  ]
+}

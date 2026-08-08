@@ -1,0 +1,18 @@
+{
+  "valid_trials": 2,
+  "invalid_trials": 2,
+  "highest_sustainable": [
+    {
+      "experiment": "broadcast",
+      "label": "epoll",
+      "total_connections": 100,
+      "highest_sustainable_valid_rate": 10000.0
+    },
+    {
+      "experiment": "broadcast",
+      "label": "poll",
+      "total_connections": 100,
+      "highest_sustainable_valid_rate": 10000.0
+    }
+  ]
+}

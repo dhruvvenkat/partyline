@@ -1,0 +1,184 @@
+{
+  "created_utc": "2026-08-08T00:24:54.262794+00:00",
+  "result_directory": "/home/dhruv/Documents/Programming/event-driven-chat-server/bench/results/20260808T002454Z-broadcast-pressure-3817fa4",
+  "git_sha": "3817fa45774568c5acf919a4a891a0c0cf5530d2",
+  "git_dirty": true,
+  "git_dirty_status": [
+    "?? bench/results/",
+    "?? epoll/run-0-results/README.md",
+    "?? epoll/run-2-results/.~lock.run-2-results.xlsx#",
+    "?? poll(2)/run-0-results/.~lock.run-0-results.xlsx#"
+  ],
+  "compiler": "g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "release_flags": "-std=c++17 -Wall -Wextra -pedantic -O2 -DNDEBUG",
+  "kernel": "7.0.0-28-generic",
+  "system": "Linux-7.0.0-28-generic-x86_64-with-glibc2.39",
+  "cpu": "13th Gen Intel(R) Core(TM) i5-1350P",
+  "logical_cpus": 16,
+  "fd_limit_soft": 1048576,
+  "fd_limit_hard": 1048576,
+  "harness_version": "comparison-v2-process-validity",
+  "worker_processes": 4,
+  "affinity": {
+    "server_cpu": 0,
+    "worker_cpus": [
+      2,
+      4,
+      5,
+      6
+    ]
+  },
+  "invocation": "bench/compare.py --no-build --name broadcast-pressure --experiments broadcast --broadcast-tiers 100 --broadcast-rates 10000,25000,50000,100000 --runs 1 --duration 1 --warmup 0.2 --drain 1 --workers 4 --server-cpu 0 --worker-cpus 2,4,5,6",
+  "implementations": [
+    "poll",
+    "epoll"
+  ],
+  "servers": {
+    "poll": "/home/dhruv/Documents/Programming/event-driven-chat-server/poll(2)/server",
+    "epoll": "/home/dhruv/Documents/Programming/event-driven-chat-server/epoll/server"
+  },
+  "workload_groups": [
+    {
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total": 100,
+      "active": 100,
+      "rates": [
+        10000.0,
+        25000.0,
+        50000.0,
+        100000.0
+      ]
+    }
+  ],
+  "parameters": {
+    "runs": 1,
+    "duration": 1.0,
+    "warmup": 0.2,
+    "drain": 1.0,
+    "payload_size": 128,
+    "min_delivery_ratio": 0.999,
+    "min_deadline_completion_ratio": 0.99,
+    "max_missed_offer_ratio": 0.01,
+    "max_scheduler_lag_ms": 20.0,
+    "max_read_service_gap_ms": 20.0,
+    "max_latency_p99_ms": 50.0
+  },
+  "historical_results_compatible": false,
+  "commands": [
+    {
+      "trial": 1,
+      "implementation": "poll",
+      "server": "/home/dhruv/Documents/Programming/event-driven-chat-server/poll(2)/server",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total_connections": 100,
+      "active_connections": 100,
+      "global_rate": 10000.0,
+      "command": "/home/dhruv/.pyenv/versions/3.13.3/bin/python3 /home/dhruv/Documents/Programming/event-driven-chat-server/bench/benchmark.py --server '/home/dhruv/Documents/Programming/event-driven-chat-server/poll(2)/server' --label poll --experiment broadcast --tiers 100 --active-connections 100 --workloads broadcast --rate 10000.0 --runs 1 --trial-id 1 --duration 1.0 --warmup 0.2 --drain 1.0 --payload-size 128 --workers 4 --min-delivery-ratio 0.999 --min-deadline-completion-ratio 0.99 --max-missed-offer-ratio 0.01 --max-scheduler-lag-ms 20.0 --max-read-service-gap-ms 20.0 --max-latency-p99-ms 50.0 --output /home/dhruv/Documents/Programming/event-driven-chat-server/bench/results/20260808T002454Z-broadcast-pressure-3817fa4/trial-01-broadcast-t100-a100-r10000p0-poll.csv --server-cpu 0 --worker-cpus 2,4,5,6",
+      "returncode": 0
+    },
+    {
+      "trial": 1,
+      "implementation": "epoll",
+      "server": "/home/dhruv/Documents/Programming/event-driven-chat-server/epoll/server",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total_connections": 100,
+      "active_connections": 100,
+      "global_rate": 10000.0,
+      "command": "/home/dhruv/.pyenv/versions/3.13.3/bin/python3 /home/dhruv/Documents/Programming/event-driven-chat-server/bench/benchmark.py --server /home/dhruv/Documents/Programming/event-driven-chat-server/epoll/server --label epoll --experiment broadcast --tiers 100 --active-connections 100 --workloads broadcast --rate 10000.0 --runs 1 --trial-id 1 --duration 1.0 --warmup 0.2 --drain 1.0 --payload-size 128 --workers 4 --min-delivery-ratio 0.999 --min-deadline-completion-ratio 0.99 --max-missed-offer-ratio 0.01 --max-scheduler-lag-ms 20.0 --max-read-service-gap-ms 20.0 --max-latency-p99-ms 50.0 --output /home/dhruv/Documents/Programming/event-driven-chat-server/bench/results/20260808T002454Z-broadcast-pressure-3817fa4/trial-01-broadcast-t100-a100-r10000p0-epoll.csv --server-cpu 0 --worker-cpus 2,4,5,6",
+      "returncode": 0
+    },
+    {
+      "trial": 1,
+      "implementation": "poll",
+      "server": "/home/dhruv/Documents/Programming/event-driven-chat-server/poll(2)/server",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total_connections": 100,
+      "active_connections": 100,
+      "global_rate": 25000.0,
+      "command": "/home/dhruv/.pyenv/versions/3.13.3/bin/python3 /home/dhruv/Documents/Programming/event-driven-chat-server/bench/benchmark.py --server '/home/dhruv/Documents/Programming/event-driven-chat-server/poll(2)/server' --label poll --experiment broadcast --tiers 100 --active-connections 100 --workloads broadcast --rate 25000.0 --runs 1 --trial-id 1 --duration 1.0 --warmup 0.2 --drain 1.0 --payload-size 128 --workers 4 --min-delivery-ratio 0.999 --min-deadline-completion-ratio 0.99 --max-missed-offer-ratio 0.01 --max-scheduler-lag-ms 20.0 --max-read-service-gap-ms 20.0 --max-latency-p99-ms 50.0 --output /home/dhruv/Documents/Programming/event-driven-chat-server/bench/results/20260808T002454Z-broadcast-pressure-3817fa4/trial-01-broadcast-t100-a100-r25000p0-poll.csv --server-cpu 0 --worker-cpus 2,4,5,6",
+      "returncode": 0
+    },
+    {
+      "trial": 1,
+      "implementation": "epoll",
+      "server": "/home/dhruv/Documents/Programming/event-driven-chat-server/epoll/server",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total_connections": 100,
+      "active_connections": 100,
+      "global_rate": 25000.0,
+      "command": "/home/dhruv/.pyenv/versions/3.13.3/bin/python3 /home/dhruv/Documents/Programming/event-driven-chat-server/bench/benchmark.py --server /home/dhruv/Documents/Programming/event-driven-chat-server/epoll/server --label epoll --experiment broadcast --tiers 100 --active-connections 100 --workloads broadcast --rate 25000.0 --runs 1 --trial-id 1 --duration 1.0 --warmup 0.2 --drain 1.0 --payload-size 128 --workers 4 --min-delivery-ratio 0.999 --min-deadline-completion-ratio 0.99 --max-missed-offer-ratio 0.01 --max-scheduler-lag-ms 20.0 --max-read-service-gap-ms 20.0 --max-latency-p99-ms 50.0 --output /home/dhruv/Documents/Programming/event-driven-chat-server/bench/results/20260808T002454Z-broadcast-pressure-3817fa4/trial-01-broadcast-t100-a100-r25000p0-epoll.csv --server-cpu 0 --worker-cpus 2,4,5,6",
+      "returncode": 0
+    }
+  ],
+  "skipped": [
+    {
+      "trial": 1,
+      "implementation": "poll",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total": 100,
+      "active": 100,
+      "rates": [
+        10000.0,
+        25000.0,
+        50000.0,
+        100000.0
+      ],
+      "rate": 50000.0,
+      "reason": "lower offered rate was invalid"
+    },
+    {
+      "trial": 1,
+      "implementation": "epoll",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total": 100,
+      "active": 100,
+      "rates": [
+        10000.0,
+        25000.0,
+        50000.0,
+        100000.0
+      ],
+      "rate": 50000.0,
+      "reason": "lower offered rate was invalid"
+    },
+    {
+      "trial": 1,
+      "implementation": "poll",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total": 100,
+      "active": 100,
+      "rates": [
+        10000.0,
+        25000.0,
+        50000.0,
+        100000.0
+      ],
+      "rate": 100000.0,
+      "reason": "lower offered rate was invalid"
+    },
+    {
+      "trial": 1,
+      "implementation": "epoll",
+      "experiment": "broadcast",
+      "workload": "broadcast",
+      "total": 100,
+      "active": 100,
+      "rates": [
+        10000.0,
+        25000.0,
+        50000.0,
+        100000.0
+      ],
+      "rate": 100000.0,
+      "reason": "lower offered rate was invalid"
+    }
+  ]
+}

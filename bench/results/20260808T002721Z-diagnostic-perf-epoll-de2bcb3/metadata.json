@@ -1,0 +1,12 @@
+{
+  "created_utc": "2026-08-08T00:27:21.492741+00:00",
+  "git_sha": "de2bcb3ab121e3bd91b5795914a6f966155fee82",
+  "git_dirty": true,
+  "kernel": "7.0.0-28-generic",
+  "mode": "perf",
+  "server": "/home/dhruv/Documents/Programming/event-driven-chat-server/epoll/server",
+  "command": "/home/dhruv/.pyenv/versions/3.13.3/bin/python3 /home/dhruv/Documents/Programming/event-driven-chat-server/bench/benchmark.py --server /home/dhruv/Documents/Programming/event-driven-chat-server/epoll/server --label epoll --experiment dense --tiers 10 --active-connections 2 --workloads direct --rate 500.0 --runs 1 --duration 0.2 --warmup 0.0 --drain 1 --workers 2 --profile perf --profile-output bench/results/20260808T002721Z-diagnostic-perf-epoll-de2bcb3/perf-server.txt --output bench/results/20260808T002721Z-diagnostic-perf-epoll-de2bcb3/results.csv",
+  "latency_claims_allowed": false,
+  "returncode": 0,
+  "perf_event_paranoid": "4"
+}
