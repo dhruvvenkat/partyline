@@ -63,6 +63,7 @@ struct ServerMetrics {
     uint64_t bytesRead = 0;
     uint64_t bytesWritten = 0;
     uint64_t queueOverflows = 0;
+    uint64_t disconnects = 0;
     uint64_t queueHighWaterBytes = 0;
     uint64_t queueHighWaterMessages = 0;
     std::vector<uint64_t> eventsPerWait;

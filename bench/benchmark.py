@@ -29,6 +29,13 @@ MAX_RECV_CALLS = 4
 MAX_RECV_BYTES = 65536
 MAX_CLIENT_SEND_QUEUE = 65536
 START_DELAY_S = 0.2
+SERVER_METRIC_FIELDS = (
+    "wait_calls", "total_events", "events_per_wait_p50", "events_per_wait_p95",
+    "events_per_wait_max", "full_event_batches", "epoll_ctl_add", "epoll_ctl_mod",
+    "epoll_ctl_del", "immediate_write_successes", "partial_writes", "send_calls",
+    "recv_calls", "send_eagain", "recv_eagain", "bytes_read", "bytes_written",
+    "queue_overflows", "disconnects", "queue_high_water_bytes", "queue_high_water_messages",
+)
 
 
 def csv_values(value, cast=str):
@@ -238,13 +245,11 @@ def close_client(selector, client, state):
         pass
 
 
-def process_client_read(selector, client, state, phase, now_ns):
-    if client["last_read_service_ns"]:
+def process_client_read(selector, client, state, phase, now_ns, ready_ns=None):
+    if ready_ns is not None:
         state["max_read_service_gap_ms"] = max(
-            state["max_read_service_gap_ms"],
-            (now_ns - client["last_read_service_ns"]) / 1_000_000,
+            state["max_read_service_gap_ms"], (now_ns - ready_ns) / 1_000_000
         )
-    client["last_read_service_ns"] = now_ns
     calls = 0
     bytes_read = 0
     while calls < phase["max_recv_calls"] and bytes_read < phase["max_recv_bytes"]:
@@ -299,13 +304,14 @@ def process_client_read(selector, client, state, phase, now_ns):
 
 def service_events(selector, clients, state, phase, timeout, cursor):
     events, cursor = rotate_ready(selector.select(timeout), cursor)
+    ready_ns = time.monotonic_ns()
     for key, mask in events:
         client = key.data
         if client["closed"]:
             continue
         now_ns = time.monotonic_ns()
         if mask & selectors.EVENT_READ:
-            process_client_read(selector, client, state, phase, now_ns)
+            process_client_read(selector, client, state, phase, now_ns, ready_ns)
         if mask & selectors.EVENT_WRITE and not client["closed"]:
             flush_client_send(selector, client, state)
     return cursor
@@ -540,6 +546,7 @@ def run_trial(server_path, label, workload, total_connections, active_connection
     state = empty_state()
     cpu_start = cpu_end = None
     server_crashed = False
+    harness_error = ""
 
     try:
         for worker_id, indices in enumerate(partitions):
@@ -595,6 +602,8 @@ def run_trial(server_path, label, workload, total_connections, active_connection
         timeout = args.drain + 10
         states = [message["state"] for message in receive_worker_messages(controls, "result", timeout)]
         state = merge_states(states)
+    except Exception as error:
+        harness_error = str(error)
     finally:
         for control in controls:
             try:
@@ -608,6 +617,7 @@ def run_trial(server_path, label, workload, total_connections, active_connection
                 process.join()
         for control in controls:
             control.close()
+        server_crashed = server_crashed or server.poll() is not None
         if server.poll() is None:
             server.terminate()
             try:
@@ -667,12 +677,78 @@ def run_trial(server_path, label, workload, total_connections, active_connection
         "client_partial_sends": state["client_partial_sends"],
         "client_send_eagain": state["client_send_eagain"],
         "server_crashed": server_crashed,
+        "harness_error": harness_error,
+        "server_disconnects": 0,
         "disconnect_reasons": " | ".join(disconnect_reasons),
     }
+    for key in SERVER_METRIC_FIELDS:
+        result[key] = None
     for key, value in (server_metrics or {}).items():
         if key != "status":
             result[key] = value
+    result["server_disconnects"] = result.get("disconnects") or 0
+    if result["server_disconnects"] == 0:
+        result["disconnect_reasons"] = ""
+    result["missed_offer_ratio"] = (
+        result["missed_offers"] / result["offered_operations"]
+        if result["offered_operations"] else 1.0
+    )
+    result["cpu_per_completed_request_us"] = (
+        server_cpu_percent * args.duration * 10_000 / result["eventual_completions"]
+        if server_cpu_percent is not None and result["eventual_completions"] else None
+    )
+    result["valid"], result["invalid_reasons"] = classify_result(result, args)
     return result
+
+
+def classify_result(row, args):
+    reasons = []
+    if row.get("harness_error"):
+        reasons.append(f"harness error: {row['harness_error']}")
+    if row.get("server_crashed"):
+        reasons.append("server crash")
+    disconnects = max(row.get("client_disconnects", 0), row.get("server_disconnects", 0))
+    if disconnects and not args.allow_disconnects:
+        reasons.append(f"unexpected disconnects: {disconnects}")
+    if row.get("send_errors", 0):
+        reasons.append(f"unexpected send errors: {row['send_errors']}")
+    if row.get("delivery_ratio", 0) < args.min_delivery_ratio:
+        reasons.append(
+            f"delivery ratio {row['delivery_ratio']:.6f} below {args.min_delivery_ratio:.6f}"
+        )
+    if row.get("missed_offer_ratio", 1) > args.max_missed_offer_ratio:
+        reasons.append(
+            f"missed offer ratio {row['missed_offer_ratio']:.6f} above "
+            f"{args.max_missed_offer_ratio:.6f}"
+        )
+    lag = row.get("scheduling_lag_p99_ms")
+    if lag is None or lag > args.max_scheduler_lag_ms:
+        reasons.append(
+            "missing scheduler lag" if lag is None else
+            f"scheduler p99 {lag:.3f} ms above {args.max_scheduler_lag_ms:.3f} ms"
+        )
+    read_gap = row.get("max_read_service_gap_ms")
+    if read_gap is None or read_gap > args.max_read_service_gap_ms:
+        reasons.append(
+            "missing read-service gap" if read_gap is None else
+            f"read-service gap {read_gap:.3f} ms above {args.max_read_service_gap_ms:.3f} ms"
+        )
+    missing = [field for field in SERVER_METRIC_FIELDS if row.get(field) is None]
+    if missing:
+        reasons.append("missing instrumentation: " + ",".join(missing))
+    if row.get("queue_overflows", 0) and not args.allow_queue_overflow:
+        reasons.append(f"unexpected queue overflows: {row['queue_overflows']}")
+    return not reasons, "; ".join(reasons)
+
+
+def valid_summary_groups(rows):
+    groups = {}
+    for row in rows:
+        if not row["valid"]:
+            continue
+        key = (row["workload"], row["total_connections"], row["active_connections"])
+        groups.setdefault(key, []).append(row)
+    return groups
 
 
 def display(value, unit=""):
@@ -689,24 +765,32 @@ def print_result(row):
         f"p95={display(row['p95_ms'], 'ms')} cpu={display(row['server_cpu_percent'], '%')} "
         f"generator_cpu={display(row['generator_cpu_percent'], '%')} "
         f"lag_p95={display(row['scheduling_lag_p95_ms'], 'ms')} "
-        f"disconnects={row['client_disconnects']} send_errors={row['send_errors']}",
+        f"disconnects={row['client_disconnects']} send_errors={row['send_errors']} "
+        f"valid={'yes' if row['valid'] else 'no'}",
         flush=True,
     )
+    if not row["valid"]:
+        print(f"  invalid: {row['invalid_reasons']}", flush=True)
 
 
 def print_summary(rows):
-    print("\nmedian across runs")
-    for key in sorted({(row["workload"], row["total_connections"], row["active_connections"]) for row in rows}):
+    print("\nmedian across valid runs")
+    for key, group in sorted(valid_summary_groups(rows).items()):
         workload, total, active = key
-        group = [row for row in rows if (
-            row["workload"], row["total_connections"], row["active_connections"]
-        ) == key]
         print(
             f"{workload:9} total={total:5} active={active:5} "
             f"offered={statistics.median(row['offered_msg_s'] for row in group):.1f}/s "
             f"p50={display(statistics.median(row['p50_ms'] for row in group if row['p50_ms'] is not None), 'ms')} "
             f"p95={display(statistics.median(row['p95_ms'] for row in group if row['p95_ms'] is not None), 'ms')}"
         )
+    invalid = [row for row in rows if not row["valid"]]
+    if invalid:
+        print("\ninvalid trials")
+        for row in invalid:
+            print(
+                f"{row['label']} {row['workload']} total={row['total_connections']} "
+                f"active={row['active_connections']} run={row['run']}: {row['invalid_reasons']}"
+            )
 
 
 def main():
@@ -727,6 +811,12 @@ def main():
     parser.add_argument("--max-offer-lag-ms", type=float, default=20.0)
     parser.add_argument("--max-recv-calls", type=int, default=MAX_RECV_CALLS)
     parser.add_argument("--max-recv-bytes", type=int, default=MAX_RECV_BYTES)
+    parser.add_argument("--min-delivery-ratio", type=float, default=0.999)
+    parser.add_argument("--max-missed-offer-ratio", type=float, default=0.01)
+    parser.add_argument("--max-scheduler-lag-ms", type=float, default=20.0)
+    parser.add_argument("--max-read-service-gap-ms", type=float, default=20.0)
+    parser.add_argument("--allow-disconnects", action="store_true")
+    parser.add_argument("--allow-queue-overflow", action="store_true")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -741,6 +831,10 @@ def main():
         parser.error("duration, rate, and drain must be positive; warmup cannot be negative")
     if args.workers < 1 or args.max_overdue_sends < 1 or args.max_recv_calls < 1:
         parser.error("worker and fairness limits must be positive")
+    if not 0 <= args.max_missed_offer_ratio <= 1 or not 0 <= args.min_delivery_ratio <= 1:
+        parser.error("validity ratios must be between zero and one")
+    if min(args.max_scheduler_lag_ms, args.max_read_service_gap_ms) <= 0:
+        parser.error("validity latency limits must be positive")
     if not 0 <= args.payload_size <= 4000:
         parser.error("payload size is out of range")
 

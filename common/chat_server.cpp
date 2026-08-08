@@ -269,6 +269,9 @@ private:
         const size_t pending = client->second.outputQueueSize;
         const size_t peak = client->second.peakPendingOutputBytes;
         const std::string username = client->second.username;
+        if (serverMetrics().active) {
+            serverMetrics().disconnects++;
+        }
         removeFromRooms(fd);
         if (!dispatcher.remove(fd) && errno != ENOENT) {
             logError("dispatcher.remove_failed", errno, fd);

@@ -1,9 +1,12 @@
 import heapq
 import selectors
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from bench.benchmark import (
+    SERVER_METRIC_FIELDS,
+    classify_result,
     due_offers,
     empty_state,
     flush_client_send,
@@ -13,6 +16,7 @@ from bench.benchmark import (
     process_client_read,
     rotate_ready,
     run_worker_phase,
+    valid_summary_groups,
 )
 
 
@@ -137,6 +141,37 @@ class BenchmarkWorkerTests(unittest.TestCase):
             [control.messages[0]["phase"]["start_ns"] for control in controls],
             [123456, 123456],
         )
+
+    def test_invalid_trials_never_enter_valid_medians(self):
+        valid = {
+            "valid": True, "workload": "direct", "total_connections": 10,
+            "active_connections": 1, "p50_ms": 2.0,
+        }
+        invalid = valid | {"valid": False, "p50_ms": 1000.0}
+        groups = valid_summary_groups([invalid, valid])
+        self.assertEqual(groups[("direct", 10, 1)], [valid])
+
+    def test_validity_reports_each_failed_criterion(self):
+        row = {field: 0 for field in SERVER_METRIC_FIELDS}
+        row.update(
+            harness_error="", server_crashed=False, client_disconnects=1,
+            server_disconnects=1, send_errors=1, delivery_ratio=0.5,
+            missed_offer_ratio=0.5, scheduling_lag_p99_ms=50,
+            max_read_service_gap_ms=50, queue_overflows=1,
+        )
+        args = SimpleNamespace(
+            allow_disconnects=False, min_delivery_ratio=0.999,
+            max_missed_offer_ratio=0.01, max_scheduler_lag_ms=20,
+            max_read_service_gap_ms=20, allow_queue_overflow=False,
+        )
+        valid, reasons = classify_result(row, args)
+        self.assertFalse(valid)
+        for reason in (
+            "unexpected disconnects", "unexpected send errors", "delivery ratio",
+            "missed offer ratio", "scheduler p99", "read-service gap",
+            "unexpected queue overflows",
+        ):
+            self.assertIn(reason, reasons)
 
 
 if __name__ == "__main__":

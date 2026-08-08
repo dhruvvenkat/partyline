@@ -136,6 +136,7 @@ void serviceMetricsSignals() {
            << ",\"bytes_read\":" << metrics.bytesRead
            << ",\"bytes_written\":" << metrics.bytesWritten
            << ",\"queue_overflows\":" << metrics.queueOverflows
+           << ",\"disconnects\":" << metrics.disconnects
            << ",\"queue_high_water_bytes\":" << metrics.queueHighWaterBytes
            << ",\"queue_high_water_messages\":" << metrics.queueHighWaterMessages
            << '}';
