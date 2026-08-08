@@ -1,6 +1,19 @@
+import heapq
+import selectors
 import unittest
+from unittest.mock import patch
 
-from bench.benchmark import is_disconnect_log, merge_states, partition_clients
+from bench.benchmark import (
+    due_offers,
+    empty_state,
+    flush_client_send,
+    is_disconnect_log,
+    merge_states,
+    partition_clients,
+    process_client_read,
+    rotate_ready,
+    run_worker_phase,
+)
 
 
 class BenchmarkWorkerTests(unittest.TestCase):
@@ -40,6 +53,90 @@ class BenchmarkWorkerTests(unittest.TestCase):
             )
         )
         self.assertFalse(is_disconnect_log("event=client.accepted fd=3"))
+
+    def test_catch_up_is_bounded_and_late_offers_are_missed(self):
+        schedule = [(index, index, object()) for index in range(5)]
+        heapq.heapify(schedule)
+        ready = due_offers(schedule, now_ns=100, max_count=2, max_lag_ns=10)
+        self.assertEqual(len(ready), 2)
+        self.assertTrue(all(offer[1] for offer in ready))
+        self.assertEqual(len(schedule), 3)
+
+    def test_ready_clients_rotate_fairly(self):
+        events = [(index, selectors.EVENT_READ) for index in range(3)]
+        first, cursor = rotate_ready(events, 0)
+        second, _ = rotate_ready(events, cursor)
+        self.assertEqual([item[0] for item in first], [0, 1, 2])
+        self.assertEqual([item[0] for item in second], [1, 2, 0])
+
+    def test_reads_are_bounded_per_socket(self):
+        class FakeSocket:
+            def __init__(self):
+                self.calls = 0
+
+            def recv(self, _size):
+                self.calls += 1
+                return b"xxxx"
+
+        client = {
+            "index": 0,
+            "sock": FakeSocket(),
+            "active": True,
+            "buffer": b"",
+            "pending": [],
+            "send_buffer": bytearray(),
+            "closed": False,
+            "last_read_service_ns": 0,
+        }
+        phase = {
+            "workload": "direct",
+            "deadline_ns": 10,
+            "max_recv_calls": 2,
+            "max_recv_bytes": 8,
+        }
+        process_client_read(object(), client, empty_state(), phase, 1)
+        self.assertEqual(client["sock"].calls, 2)
+        self.assertEqual(client["buffer"], b"xxxxxxxx")
+
+    def test_partial_client_sends_are_retried(self):
+        class FakeSocket:
+            def __init__(self):
+                self.calls = 0
+
+            def send(self, data):
+                self.calls += 1
+                return 2 if self.calls == 1 else len(data)
+
+        class FakeSelector:
+            def modify(self, *_args):
+                pass
+
+        client = {"sock": FakeSocket(), "send_buffer": bytearray(b"abcdef")}
+        state = empty_state()
+        flush_client_send(FakeSelector(), client, state)
+        self.assertEqual(client["send_buffer"], b"")
+        self.assertEqual(state["client_partial_sends"], 1)
+
+    def test_workers_receive_one_synchronized_start_time(self):
+        class FakeControl:
+            def __init__(self):
+                self.messages = []
+
+            def send(self, message):
+                self.messages.append(message)
+
+        controls = [FakeControl(), FakeControl()]
+        phase = {"start_ns": 123456, "duration": 0, "drain": 0}
+        replies = [
+            {"type": "result", "state": empty_state(0)},
+            {"type": "result", "state": empty_state(1)},
+        ]
+        with patch("bench.benchmark.receive_worker_messages", return_value=replies):
+            run_worker_phase(controls, phase)
+        self.assertEqual(
+            [control.messages[0]["phase"]["start_ns"] for control in controls],
+            [123456, 123456],
+        )
 
 
 if __name__ == "__main__":
