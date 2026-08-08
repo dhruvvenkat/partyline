@@ -486,12 +486,17 @@ def run_phase(selector, clients, phase, worker_id):
     state["generator_cpu_seconds"] = time.process_time() - cpu_start
 
     drain_deadline = time.monotonic() + phase["drain"]
+    quiet_since = time.monotonic()
+    previous_deliveries = state["deliveries"]
     while time.monotonic() < drain_deadline:
-        before = state["deliveries"]
         cursor = service_events(selector, clients, state, phase, 0.02, cursor)
-        if state["deliveries"] == before and all(
+        if state["deliveries"] != previous_deliveries:
+            previous_deliveries = state["deliveries"]
+            quiet_since = time.monotonic()
+        queues_empty = all(
             not client["pending"] and not client["send_buffer"] for client in clients
-        ):
+        )
+        if queues_empty and time.monotonic() - quiet_since >= 0.1:
             break
     return state
 
