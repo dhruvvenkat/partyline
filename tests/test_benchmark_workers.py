@@ -162,7 +162,8 @@ class BenchmarkWorkerTests(unittest.TestCase):
         args = SimpleNamespace(
             allow_disconnects=False, min_delivery_ratio=0.999,
             max_missed_offer_ratio=0.01, max_scheduler_lag_ms=20,
-            max_read_service_gap_ms=20, allow_queue_overflow=False,
+            max_read_service_gap_ms=20, max_latency_p99_ms=20,
+            min_deadline_completion_ratio=0.99, allow_queue_overflow=False,
         )
         valid, reasons = classify_result(row, args)
         self.assertFalse(valid)

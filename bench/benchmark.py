@@ -424,10 +424,19 @@ def run_phase(selector, clients, phase, worker_id):
     return state
 
 
-def worker_main(worker_id, indices, active_indices, port, control):
+def worker_main(worker_id, indices, active_indices, port, control, worker_cpus):
     selector = selectors.DefaultSelector()
     clients = []
     try:
+        affinity_applied = False
+        assigned_cpu = None
+        if worker_cpus:
+            assigned_cpu = worker_cpus[worker_id % len(worker_cpus)]
+            try:
+                os.sched_setaffinity(0, {assigned_cpu})
+                affinity_applied = os.sched_getaffinity(0) == {assigned_cpu}
+            except (AttributeError, OSError):
+                pass
         active = set(active_indices)
         for index in indices:
             client = new_client(index, port, index in active)
@@ -435,7 +444,10 @@ def worker_main(worker_id, indices, active_indices, port, control):
             clients.append(client)
             if len(clients) % 16 == 0:
                 settle_clients(selector, clients, 0.001)
-        control.send({"type": "connected", "worker_id": worker_id})
+        control.send({
+            "type": "connected", "worker_id": worker_id,
+            "affinity_applied": affinity_applied, "assigned_cpu": assigned_cpu,
+        })
         while True:
             if control.poll(0.01):
                 command = control.recv()
@@ -533,10 +545,20 @@ def run_trial(server_path, label, workload, total_connections, active_connection
     metrics_temp = tempfile.TemporaryDirectory()
     metrics_path = Path(metrics_temp.name) / "server-metrics.jsonl"
     environment["CHAT_METRICS_FILE"] = str(metrics_path)
+    server_command = [str(server_path)]
+    if args.server_cpu is not None:
+        server_command = ["taskset", "-c", str(args.server_cpu), str(server_path)]
     server = subprocess.Popen(
-        [str(server_path)], cwd=ROOT, env=environment,
+        server_command, cwd=ROOT, env=environment,
         stdout=subprocess.DEVNULL, stderr=log,
     )
+    server_affinity_applied = False
+    if args.server_cpu is not None:
+        try:
+            time.sleep(0.01)
+            server_affinity_applied = os.sched_getaffinity(server.pid) == {args.server_cpu}
+        except (AttributeError, OSError, ProcessLookupError):
+            pass
     worker_count = min(total_connections, args.workers)
     partitions = partition_clients(list(range(total_connections)), worker_count)
     context = multiprocessing.get_context("spawn")
@@ -547,19 +569,25 @@ def run_trial(server_path, label, workload, total_connections, active_connection
     cpu_start = cpu_end = None
     server_crashed = False
     harness_error = ""
+    worker_setup = []
 
     try:
         for worker_id, indices in enumerate(partitions):
             parent, child = context.Pipe()
             process = context.Process(
                 target=worker_main,
-                args=(worker_id, indices, list(range(active_connections)), port, child),
+                args=(
+                    worker_id, indices, list(range(active_connections)), port, child,
+                    args.worker_cpus,
+                ),
             )
             process.start()
             child.close()
             controls.append(parent)
             processes.append(process)
-        receive_worker_messages(controls, "connected", max(20, total_connections / 100))
+        worker_setup = receive_worker_messages(
+            controls, "connected", max(20, total_connections / 100)
+        )
         for control in controls:
             control.send({"type": "setup_complete"})
         receive_worker_messages(controls, "ready", 10)
@@ -641,12 +669,19 @@ def run_trial(server_path, label, workload, total_connections, active_connection
     result = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "label": label,
+        "experiment": args.experiment,
         "server": str(server_path),
         "workload": workload,
         "total_connections": total_connections,
         "active_connections": active_connections,
         "clients": total_connections,
         "load_workers": worker_count,
+        "server_affinity": str(args.server_cpu) if args.server_cpu is not None else "none",
+        "server_affinity_applied": server_affinity_applied,
+        "worker_affinity": ",".join(map(str, args.worker_cpus)) if args.worker_cpus else "none",
+        "worker_affinity_applied": bool(worker_setup) and all(
+            message["affinity_applied"] for message in worker_setup
+        ) if args.worker_cpus else False,
         "run": run,
         "duration_s": args.duration,
         "global_offered_rate_s": args.rate,
@@ -660,6 +695,12 @@ def run_trial(server_path, label, workload, total_connections, active_connection
         "completed_by_deadline_msg_s": state["completed_by_deadline"] / args.duration,
         "delivered": state["deliveries"],
         "delivered_by_deadline_msg_s": state["deliveries_by_deadline"] / args.duration,
+        "inbound_messages_s": state["sent_operations"] / args.duration,
+        "outbound_deliveries_s": state["deliveries_by_deadline"] / args.duration,
+        "per_socket_receive_rate_s": (
+            state["deliveries_by_deadline"] / args.duration / total_connections
+        ),
+        "fan_out": total_connections - 1 if workload == "broadcast" else 1,
         "delivery_ratio": state["deliveries"] / expected_deliveries if expected_deliveries else 1.0,
         "latency_samples": len(latency),
         "p50_ms": percentile(latency, 0.50),
@@ -693,6 +734,10 @@ def run_trial(server_path, label, workload, total_connections, active_connection
         result["missed_offers"] / result["offered_operations"]
         if result["offered_operations"] else 1.0
     )
+    result["deadline_completion_ratio"] = (
+        result["completed_by_deadline"] / result["sent_operations"]
+        if result["sent_operations"] else 0.0
+    )
     result["cpu_per_completed_request_us"] = (
         server_cpu_percent * args.duration * 10_000 / result["eventual_completions"]
         if server_cpu_percent is not None and result["eventual_completions"] else None
@@ -716,6 +761,12 @@ def classify_result(row, args):
         reasons.append(
             f"delivery ratio {row['delivery_ratio']:.6f} below {args.min_delivery_ratio:.6f}"
         )
+    deadline_ratio = row.get("deadline_completion_ratio", 0)
+    if deadline_ratio < args.min_deadline_completion_ratio:
+        reasons.append(
+            f"deadline completion ratio {deadline_ratio:.6f} below "
+            f"{args.min_deadline_completion_ratio:.6f}"
+        )
     if row.get("missed_offer_ratio", 1) > args.max_missed_offer_ratio:
         reasons.append(
             f"missed offer ratio {row['missed_offer_ratio']:.6f} above "
@@ -726,6 +777,12 @@ def classify_result(row, args):
         reasons.append(
             "missing scheduler lag" if lag is None else
             f"scheduler p99 {lag:.3f} ms above {args.max_scheduler_lag_ms:.3f} ms"
+        )
+    latency = row.get("p99_ms")
+    if latency is None or latency > args.max_latency_p99_ms:
+        reasons.append(
+            "missing latency p99" if latency is None else
+            f"latency p99 {latency:.3f} ms above {args.max_latency_p99_ms:.3f} ms"
         )
     read_gap = row.get("max_read_service_gap_ms")
     if read_gap is None or read_gap > args.max_read_service_gap_ms:
@@ -797,6 +854,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server", required=True)
     parser.add_argument("--label", required=True)
+    parser.add_argument("--experiment", choices=("sparse", "dense", "broadcast", "smoke"), default="smoke")
     parser.add_argument("--tiers", type=lambda value: csv_values(value, int), default=[100])
     parser.add_argument("--active-connections", type=int)
     parser.add_argument("--workloads", type=csv_values, default=["direct"])
@@ -807,13 +865,17 @@ def main():
     parser.add_argument("--rate", type=float, default=1000.0, help="fixed global offered operations/s")
     parser.add_argument("--payload-size", type=int, default=128)
     parser.add_argument("--workers", type=int, default=max(1, min(4, os.cpu_count() or 1)))
+    parser.add_argument("--server-cpu", type=int)
+    parser.add_argument("--worker-cpus", type=lambda value: csv_values(value, int), default=[])
     parser.add_argument("--max-overdue-sends", type=int, default=MAX_OVERDUE_SENDS)
     parser.add_argument("--max-offer-lag-ms", type=float, default=20.0)
     parser.add_argument("--max-recv-calls", type=int, default=MAX_RECV_CALLS)
     parser.add_argument("--max-recv-bytes", type=int, default=MAX_RECV_BYTES)
     parser.add_argument("--min-delivery-ratio", type=float, default=0.999)
+    parser.add_argument("--min-deadline-completion-ratio", type=float, default=0.99)
     parser.add_argument("--max-missed-offer-ratio", type=float, default=0.01)
     parser.add_argument("--max-scheduler-lag-ms", type=float, default=20.0)
+    parser.add_argument("--max-latency-p99-ms", type=float, default=50.0)
     parser.add_argument("--max-read-service-gap-ms", type=float, default=20.0)
     parser.add_argument("--allow-disconnects", action="store_true")
     parser.add_argument("--allow-queue-overflow", action="store_true")
@@ -831,10 +893,15 @@ def main():
         parser.error("duration, rate, and drain must be positive; warmup cannot be negative")
     if args.workers < 1 or args.max_overdue_sends < 1 or args.max_recv_calls < 1:
         parser.error("worker and fairness limits must be positive")
-    if not 0 <= args.max_missed_offer_ratio <= 1 or not 0 <= args.min_delivery_ratio <= 1:
+    if (not 0 <= args.max_missed_offer_ratio <= 1 or
+            not 0 <= args.min_delivery_ratio <= 1 or
+            not 0 <= args.min_deadline_completion_ratio <= 1):
         parser.error("validity ratios must be between zero and one")
-    if min(args.max_scheduler_lag_ms, args.max_read_service_gap_ms) <= 0:
+    if min(args.max_scheduler_lag_ms, args.max_read_service_gap_ms,
+           args.max_latency_p99_ms) <= 0:
         parser.error("validity latency limits must be positive")
+    if args.server_cpu is not None and args.server_cpu in args.worker_cpus:
+        parser.error("server and worker CPU affinity sets must not overlap")
     if not 0 <= args.payload_size <= 4000:
         parser.error("payload size is out of range")
 

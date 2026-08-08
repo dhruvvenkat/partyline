@@ -15,10 +15,10 @@ debug: server_debug
 asan: server_asan
 
 benchmark: server
-	python3 ../bench/compare.py --implementations epoll --name epoll
+	python3 ../bench/compare.py --no-build --implementations epoll --name epoll --experiments sparse
 
 benchmark-smoke: server
-	python3 ../bench/compare.py --implementations epoll --name epoll-smoke --tiers 10 --runs 1 --warmup 0.2 --duration 1 --drain 0.5
+	python3 ../bench/compare.py --no-build --implementations epoll --name epoll-smoke --experiments sparse --sparse-tiers 10 --sparse-active 1,5 --runs 1 --warmup 0.1 --duration 0.5 --drain 0.5
 
 SERVER_SOURCES := epoll_dispatcher.cpp ../common/chat_server.cpp ../common/server_common.cpp
 SERVER_HEADERS := ../common/chat_server.hpp ../common/server_common.hpp
