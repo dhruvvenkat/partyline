@@ -13,6 +13,9 @@ Canonical result sets:
 - `20260808T002705Z-broadcast-pressure-final-de2bcb3`: measured 10K/25K
   broadcast pressure boundary after separating the warmup rate.
 - `20260808T002743Z-sparse-20k-de2bcb3`: strongest safe local sparse tier.
+- `20260808T015411Z-full-local-rerun-3e91d76`: three-trial poll/epoll rerun
+  covering sparse readiness through 20K connections plus dense and broadcast
+  rate sweeps. This is the current full local comparison.
 
 The other directories are retained because results are never overwritten:
 
@@ -27,6 +30,9 @@ The other directories are retained because results are never overwritten:
 - `20260808T002721Z-diagnostic-perf-epoll-de2bcb3` and
   `20260808T002727Z-diagnostic-strace-epoll-de2bcb3` record local profiling
   permission failures. Diagnostic runs are never eligible for latency claims.
+- `20260808T013320Z-full-local-rerun-44da0db` is the interrupted first attempt
+  that exposed a fixed warmup rate exceeding low measured rates. It is
+  incomplete and ineligible for headline comparisons.
 
 For completed comparisons, use `metadata.json`, `summary.json`,
 `headline-valid-medians.csv`, and `invalid-trials.csv` together. Headline rows
