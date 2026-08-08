@@ -34,6 +34,17 @@ def wait_for_metrics(path, count):
     raise AssertionError("server did not emit metrics")
 
 
+def connect_with_retry(port):
+    deadline = time.monotonic() + 3
+    while True:
+        try:
+            return socket.create_connection(("127.0.0.1", port), timeout=0.2)
+        except (ConnectionRefusedError, socket.timeout):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 class EpollEventCapacityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -62,7 +73,7 @@ class EpollEventCapacityTests(unittest.TestCase):
             stopped = False
             try:
                 for index in range(CLIENT_COUNT):
-                    client = socket.create_connection(("127.0.0.1", port), timeout=2)
+                    client = connect_with_retry(port)
                     receive_until(client, b"enter your username: ")
                     client.sendall(f"ready-{index}\n".encode())
                     clients.append(client)

@@ -9,7 +9,9 @@ import multiprocessing
 import os
 import platform
 import selectors
+import shlex
 import signal
+import shutil
 import socket
 import statistics
 import subprocess
@@ -29,6 +31,14 @@ MAX_RECV_CALLS = 4
 MAX_RECV_BYTES = 65536
 MAX_CLIENT_SEND_QUEUE = 65536
 START_DELAY_S = 0.2
+PERF_BASE_EVENTS = (
+    "task-clock", "cycles", "instructions", "context-switches", "cpu-migrations",
+    "cache-references", "cache-misses",
+)
+SYSCALL_TRACEPOINTS = (
+    "sys_enter_poll", "sys_enter_epoll_wait", "sys_enter_epoll_ctl",
+    "sys_enter_sendto", "sys_enter_recvfrom",
+)
 SERVER_METRIC_FIELDS = (
     "wait_calls", "total_events", "events_per_wait_p50", "events_per_wait_p95",
     "events_per_wait_max", "full_event_batches", "epoll_ctl_add", "epoll_ctl_mod",
@@ -163,6 +173,68 @@ def server_cpu_seconds(pid):
         return ticks / os.sysconf("SC_CLK_TCK")
     except (FileNotFoundError, IndexError, OSError, ValueError):
         return None
+
+
+def available_perf_events(trace_roots=None):
+    roots = trace_roots or (
+        Path("/sys/kernel/tracing/events/syscalls"),
+        Path("/sys/kernel/debug/tracing/events/syscalls"),
+    )
+    events = list(PERF_BASE_EVENTS)
+    for name in SYSCALL_TRACEPOINTS:
+        available = False
+        for root in roots:
+            try:
+                available = available or (root / name).is_dir()
+            except OSError:
+                continue
+        if available:
+            events.append(f"syscalls:{name}")
+    return events
+
+
+def profiler_command(mode, output, pid, events=None):
+    if mode == "perf":
+        return [
+            "perf", "stat", "-x", ",", "-o", str(output),
+            "-e", ",".join(events or available_perf_events()), "-p", str(pid),
+        ]
+    if mode == "strace":
+        return ["strace", "-f", "-c", "-o", str(output), "-p", str(pid)]
+    raise ValueError(f"unknown profiler: {mode}")
+
+
+def start_profiler(mode, output, pid):
+    executable = shutil.which(mode)
+    events = available_perf_events() if mode == "perf" else []
+    command = profiler_command(mode, output, pid, events)
+    stderr_path = output.with_suffix(output.suffix + ".stderr")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if executable is None:
+        stderr_path.write_text(f"{mode} is not installed\n")
+        return None, None, command, events, f"{mode} is not installed"
+    stderr_file = stderr_path.open("w")
+    process = subprocess.Popen(
+        command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=stderr_file,
+    )
+    time.sleep(0.1)
+    error = ""
+    if process.poll() is not None:
+        stderr_file.flush()
+        error = stderr_path.read_text().strip() or f"{mode} exited with {process.returncode}"
+    return process, stderr_file, command, events, error
+
+
+def stop_profiler(process, stderr_file):
+    if process is not None and process.poll() is None:
+        process.send_signal(signal.SIGINT)
+        try:
+            process.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            process.wait(timeout=2)
+    if stderr_file is not None:
+        stderr_file.close()
 
 
 def new_client(index, port, active):
@@ -570,6 +642,11 @@ def run_trial(server_path, label, workload, total_connections, active_connection
     server_crashed = False
     harness_error = ""
     worker_setup = []
+    profiler = profiler_stderr = None
+    profile_command = []
+    profile_events = []
+    profile_error = ""
+    profile_started = False
 
     try:
         for worker_id, indices in enumerate(partitions):
@@ -605,6 +682,11 @@ def run_trial(server_path, label, workload, total_connections, active_connection
                     f"send_errors={warmup_state['send_errors']}"
                 )
 
+        if args.profile != "none":
+            profiler, profiler_stderr, profile_command, profile_events, profile_error = start_profiler(
+                args.profile, args.profile_output, server.pid
+            )
+            profile_started = profiler is not None and profiler.poll() is None
         server.send_signal(signal.SIGUSR1)
         wait_for_metrics(metrics_path, 1)
         phase = phase_config(
@@ -627,12 +709,15 @@ def run_trial(server_path, label, workload, total_connections, active_connection
             records = wait_for_metrics(metrics_path, 2)
             if len(records) >= 2:
                 server_metrics = records[-1]
+        stop_profiler(profiler, profiler_stderr)
+        profiler = profiler_stderr = None
         timeout = args.drain + 10
         states = [message["state"] for message in receive_worker_messages(controls, "result", timeout)]
         state = merge_states(states)
     except Exception as error:
         harness_error = str(error)
     finally:
+        stop_profiler(profiler, profiler_stderr)
         for control in controls:
             try:
                 control.send({"type": "close"})
@@ -718,6 +803,11 @@ def run_trial(server_path, label, workload, total_connections, active_connection
         "client_partial_sends": state["client_partial_sends"],
         "client_send_eagain": state["client_send_eagain"],
         "server_crashed": server_crashed,
+        "diagnostic_mode": args.profile,
+        "profile_started": profile_started,
+        "profile_command": shlex.join(profile_command) if profile_command else "",
+        "profile_events": ";".join(profile_events),
+        "profile_error": profile_error,
         "harness_error": harness_error,
         "server_disconnects": 0,
         "disconnect_reasons": " | ".join(disconnect_reasons),
@@ -748,6 +838,11 @@ def run_trial(server_path, label, workload, total_connections, active_connection
 
 def classify_result(row, args):
     reasons = []
+    diagnostic_mode = row.get("diagnostic_mode", "none")
+    if diagnostic_mode != "none":
+        reasons.append(f"diagnostic {diagnostic_mode} run is not eligible for latency claims")
+        if not row.get("profile_started"):
+            reasons.append(f"{diagnostic_mode} profiler unavailable")
     if row.get("harness_error"):
         reasons.append(f"harness error: {row['harness_error']}")
     if row.get("server_crashed"):
@@ -879,6 +974,8 @@ def main():
     parser.add_argument("--max-read-service-gap-ms", type=float, default=20.0)
     parser.add_argument("--allow-disconnects", action="store_true")
     parser.add_argument("--allow-queue-overflow", action="store_true")
+    parser.add_argument("--profile", choices=("none", "perf", "strace"), default="none")
+    parser.add_argument("--profile-output", type=Path)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
 
@@ -902,6 +999,12 @@ def main():
         parser.error("validity latency limits must be positive")
     if args.server_cpu is not None and args.server_cpu in args.worker_cpus:
         parser.error("server and worker CPU affinity sets must not overlap")
+    if args.profile != "none" and args.profile_output is None:
+        parser.error("--profile-output is required with --profile")
+    if args.profile != "none" and (
+        len(args.tiers) != 1 or len(args.workloads) != 1 or args.runs != 1
+    ):
+        parser.error("profiling supports exactly one trial configuration")
     if not 0 <= args.payload_size <= 4000:
         parser.error("payload size is out of range")
 

@@ -1,83 +1,184 @@
-# Scale experiment
+# Benchmark harness
 
-This benchmark is the baseline for comparing the current `poll()` server with
-a future `epoll()` implementation. It launches the selected server on
-loopback, creates healthy clients, warms up, measures, drains late responses,
-and writes one CSV row per trial.
+The current harness compares the release `poll(2)` and `epoll(7)` servers with
+the same application core and a process-based load generator. Each worker
+process owns a stable client partition and selector, so Python's GIL is not in
+the network hot path.
 
-## Workloads
+Historical CSV/XLSX files in the backend result folders predate this harness
+and are not comparable. See [HISTORICAL_RESULTS.md](HISTORICAL_RESULTS.md).
 
-- `direct`: every client sends `WHERE`. This avoids room fan-out and measures
-  request/response latency and throughput as the ready-fd set grows.
-- `broadcast`: all but one client send a 128-byte marked chat message. Every
-  client drains its socket. The harness counts actual outbound message
-  deliveries and measures one-way latency at the observer.
-
-`--rate` controls messages per sending client per second. The server no longer
-rate-limits clients, so the saturation baseline uses the highest sustained
-rate found for each tier without disconnects, send errors, or delivery loss.
-
-The load generator partitions clients across worker threads, each with its own
-selector and send schedule. It defaults to two workers; larger counts contend
-on Python's GIL at this workload. Use `--workers N` to override that choice.
-
-## Baseline
-
-Run `make benchmark`. It performs three 10-second trials at each load and
-writes the five `poll-unlimited-*.csv` files under `bench/results/`.
-
-For a quick integration check:
+## Build and test
 
 ```sh
-make benchmark-smoke
+make release          # both servers: -O2 -DNDEBUG
+make debug            # separate unoptimized debug binaries
+make asan             # separate ASan/UBSan binaries
+make test             # unit, integration, parity, fairness, and headroom tests
 ```
 
-## Future `epoll()` comparison
+The active server implementation is shared except for
+`poll(2)/poll_dispatcher.cpp` and `epoll/epoll_dispatcher.cpp`. This keeps the
+protocol, room behavior, limits, immediate writes, fairness budgets,
+backpressure, and command handling identical.
 
-Build both binaries with identical compiler flags. On an otherwise idle
-machine, alternate which implementation runs first and collect at least three
-runs:
+## Comparison commands
+
+Every command creates a new timestamped result directory under
+`bench/results/`; historical directories are never reused or removed.
 
 ```sh
-python3 bench/benchmark.py --server ./server_poll --label poll --rate 100 --workloads direct
-python3 bench/benchmark.py --server ./server_epoll --label epoll --rate 100 --workloads direct
+make compare-smoke
+make compare-sparse
+make compare-dense
+make compare-broadcast
+make compare           # all three full default sweeps
 ```
 
-Compare per tier:
+The full driver can be configured directly:
 
-- p50/p95/p99 latency;
-- completed inbound messages/s;
-- delivered outbound messages/s and delivery ratio;
-- server CPU percentage;
-- p95 load-generator scheduling lag, disconnects, and send errors.
+```sh
+python3 bench/compare.py \
+  --sparse-tiers 1000,5000,10000,50000 --sparse-active 1,10,100 \
+  --sparse-rate 1000 \
+  --dense-tiers 100,500,1000 --dense-rates 1000,5000,10000,25000,50000,100000 \
+  --broadcast-tiers 10,100,500 --broadcast-rates 100,500,1000,5000 \
+  --runs 3 --duration 10 --warmup 1 --drain 2 --workers 4
+```
 
-Use medians across runs. Treat results as valid only when delivery ratio is
-near 1, there are no disconnects/send errors, and generator lag is small
-relative to the latency being compared. Keep the machine, kernel, compiler
-flags, payload, rates, and client harness unchanged.
+The driver builds both release binaries unless `--no-build` is given, passes
+absolute server paths with correct labels, and reverses poll/epoll order on
+alternating trials. Dense and broadcast rates are swept independently for
+each server; higher rates are skipped after that implementation first becomes
+invalid.
 
-## Unrestricted `poll()` saturation baseline: 2026-07-31
+Optional CPU isolation uses ordinary per-process affinity and needs no root:
 
-These historical numbers used the old single-threaded load generator. Rerun
-both servers with the threaded harness before making implementation comparisons.
+```sh
+python3 bench/compare.py --server-cpu 0 --worker-cpus 2,4,5,6
+```
 
-Measured on Linux 7.0.0-28-generic, Intel Core i5-1350P (12 cores/16 logical
-CPUs), GCC 13.3, and Python 3.13.3. The server used the project's current
-unoptimized build command.
+The requested and observed affinity status is recorded in both metadata and
+trial rows. Use different physical cores for the server and workers.
 
-| Workload | Users | Rate/client/s | Completed/s | Delivered/s | p50 | p95 | p99 | Server CPU |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| direct | 10 | 100 | 1,000.0 | 1,000.0 | 0.07 ms | 0.19 ms | 0.28 ms | 4.3% |
-| direct | 50 | 100 | 5,000.0 | 5,000.0 | 0.10 ms | 0.29 ms | 0.44 ms | 13.2% |
-| direct | 100 | 100 | 9,999.2 | 9,999.2 | 0.12 ms | 0.27 ms | 0.49 ms | 27.3% |
-| direct | 500 | 100 | 49,998.5 | 49,998.5 | 0.27 ms | 3.99 ms | 10.70 ms | 96.7% |
-| broadcast | 10 | 2,000 | 17,999.9 | 161,991.4 | 0.18 ms | 3.33 ms | 7.69 ms | 39.1% |
-| broadcast | 50 | 200 | 9,799.6 | 480,071.8 | 0.33 ms | 0.79 ms | 1.99 ms | 66.7% |
-| broadcast | 100 | 60 | 5,939.9 | 587,964.6 | 0.29 ms | 1.89 ms | 3.75 ms | 88.2% |
-| broadcast | 500 | 2 | 996.4 | 497,387.0 | 10.60 ms | 18.34 ms | 23.33 ms | 97.2% |
+## Experiments
 
-All rows are medians of 3/3 valid trials with 100% eventual delivery, no
-disconnects, and no send errors. Overload probes found these next steps were
-not sustainable: broadcast 3/client/s at 500 users, 250/client/s at 50 users,
-and 3,000/client/s at 10 users. They overflowed the fixed 16 KiB per-client
-pending-output queues and disconnected clients.
+### Sparse readiness
+
+`total_connections` and `active_connections` are independent. Inactive
+clients remain connected at the username prompt and produce no measured
+traffic. Active clients issue direct `WHERE` requests at one fixed global
+offered rate. The default totals are 1K, 5K, 10K, and 50K, with 1, 10, and 100
+active clients where possible.
+
+Headline fields include CPU per completed request, p50/p95/p99 latency, wait
+calls, events per wait, full event batches, `epoll_ctl` calls, and generator
+validity.
+
+### Dense readiness
+
+All connected clients are active. Each server is swept through ascending
+global offered rates until latency, deadline completion, delivery, scheduling,
+or error criteria fail. `summary.json` reports the highest rate that completed
+all requested trials validly; a single fixed-rate run is never reported as
+maximum throughput.
+
+### Broadcast and backpressure
+
+Broadcast rows are kept out of the readiness-dispatch headline comparison.
+They record inbound messages/s, outbound deliveries/s, per-socket receive
+rate, fan-out, queue high-water marks, disconnects, and generator service
+gaps. The server's normal 16 KiB per-client queue is retained. No larger
+dispatcher-isolation queue configuration is currently used.
+
+## Generator behavior
+
+Workers share an absolute monotonic start time. The offered rate is global,
+not per-client. Each selector loop handles at most 32 overdue offers before
+servicing reads. Offers over the scheduling-lag limit are counted as missed
+instead of being injected as a burst. Client-side partial nonblocking sends
+are buffered and retried in order.
+
+Each ready socket is rotated through the batch and bounded to four `recv()`
+calls and 64 KiB per selector iteration. Trial rows include generator CPU,
+p50/p95/p99 scheduling lag, missed offers, worker start skew, partial client
+sends, and maximum delay between a selector return and read service.
+
+## Validity
+
+Every row contains `valid` and `invalid_reasons`. By default a normal trial is
+invalid when it has any of the following:
+
+- an unexpected client/server disconnect or send error;
+- delivery ratio below 0.999;
+- completed-by-deadline ratio below 0.99;
+- missed-offer ratio above 0.01;
+- scheduler p99 or maximum read-service delay above 20 ms;
+- latency p99 above 50 ms;
+- a server crash or harness error;
+- missing server instrumentation;
+- output queue overflow outside an explicitly allowed backpressure diagnostic.
+
+Thresholds are command-line options. `headline-valid-medians.csv` contains
+only valid rows. `invalid-trials.csv` lists rejected rows and reasons.
+`summary.json` contains valid/invalid counts and sustainable dense/broadcast
+rates.
+
+## Result schema and metadata
+
+`results.csv` records:
+
+- identity: experiment, implementation label, server path, run, totals,
+  active clients, workers, workload, payload, and affinity status;
+- offered work: scheduled operations, sent operations, missed offers, and
+  global offered rate;
+- completion: completed-by-deadline, eventual completions, deliveries,
+  delivery ratios, fan-out, and inbound/outbound rates;
+- latency and driver health: p50/p95/p99, scheduling-lag percentiles,
+  generator CPU, server CPU, CPU/completion, and read-service gap;
+- server interval counters: wait calls, total events, p50/p95/max events per
+  wait, full event batches, `epoll_ctl` ADD/MOD/DEL, immediate and partial
+  writes, send/recv/EAGAIN counts, bytes, disconnects, queue overflow, and
+  queue high-water marks;
+- validity: crash/error/disconnect fields, `valid`, and `invalid_reasons`.
+
+Counters are accumulated in memory between `SIGUSR1` and `SIGUSR2`; the server
+writes the snapshot only after the timed interval. The harness sets
+`CHAT_LOG_LEVEL=off`, so per-event logging is not part of benchmark timing.
+
+`metadata.json` records the full command, git SHA and dirty status,
+compiler/flags, kernel, CPU, file-descriptor limits, harness version, worker
+count, requested affinity, workload parameters, absolute server paths,
+execution order, skipped rates, and return codes.
+
+## Diagnostics
+
+`perf stat` and `strace -c` are separate diagnostics and are never eligible
+for latency headlines:
+
+```sh
+make profile-perf
+make profile-strace
+
+python3 bench/profile.py --mode perf --implementation poll \
+  --server-cpu 0 --worker-cpus 2,4,5,6
+```
+
+The perf wrapper requests task clock, cycles, instructions, context switches,
+CPU migrations, cache references/misses, and readable syscall tracepoints for
+`poll`, `epoll_wait`, `epoll_ctl`, `sendto`, and `recvfrom`. Unavailable
+tracepoints are omitted. The strace wrapper attaches with `-f -c`; traced rows
+are explicitly invalid for latency claims. Permission failures and
+`perf_event_paranoid` are preserved in the diagnostic result directory. The
+wrappers never request root or alter machine-wide settings.
+
+## Reproduction checklist
+
+1. Close unrelated CPU- and network-heavy programs.
+2. Record `ulimit -n`; the driver also stores soft and hard limits.
+3. Build with `make release` and verify `make test`.
+4. Choose non-overlapping physical cores if using affinity.
+5. Run at least three trials; order alternation is automatic.
+6. Read `invalid-trials.csv` before using headline medians.
+7. Compare only rows from the same harness version, commit, flags, workload,
+   thresholds, and machine configuration.

@@ -4,7 +4,7 @@ RELEASE_FLAGS := $(COMMON_FLAGS) -O2 -DNDEBUG
 DEBUG_FLAGS := $(COMMON_FLAGS) -O0 -g
 ASAN_FLAGS := $(COMMON_FLAGS) -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer
 
-.PHONY: all release debug asan poll epoll compare compare-smoke compare-sparse compare-dense compare-broadcast queue-test test clean
+.PHONY: all release debug asan poll epoll compare compare-smoke compare-sparse compare-dense compare-broadcast profile-perf profile-strace queue-test test clean
 
 all: release
 
@@ -38,6 +38,12 @@ compare-dense: release
 
 compare-broadcast: release
 	python3 bench/compare.py --no-build --experiments broadcast
+
+profile-perf: release
+	python3 bench/profile.py --no-build --mode perf
+
+profile-strace: release
+	python3 bench/profile.py --no-build --mode strace
 
 queue-test:
 	$(CXX) $(DEBUG_FLAGS) -I. tests/queue_fast_path_test.cpp common/server_common.cpp -o /tmp/event_chat_queue_fast_path_test
