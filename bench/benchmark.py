@@ -607,6 +607,10 @@ def phase_config(args, workload, total_connections, active_connections, duration
     }
 
 
+def configured_warmup_rate(args):
+    return args.warmup_rate if args.warmup_rate is not None else min(args.rate, 1000.0)
+
+
 def run_worker_phase(controls, phase):
     for control in controls:
         control.send({"type": "phase", "phase": phase})
@@ -679,6 +683,7 @@ def run_trial(server_path, label, workload, total_connections, active_connection
                 args, workload, total_connections, active_connections,
                 args.warmup, f"warmup-{run}",
             )
+            warmup["rate"] = configured_warmup_rate(args)
             warmup_state = merge_states(run_worker_phase(controls, warmup))
             if warmup_state["disconnects"] or warmup_state["send_errors"]:
                 raise RuntimeError(
@@ -962,6 +967,7 @@ def main():
     parser.add_argument("--trial-id", type=int, default=1)
     parser.add_argument("--duration", type=float, default=5.0)
     parser.add_argument("--warmup", type=float, default=1.0)
+    parser.add_argument("--warmup-rate", type=float)
     parser.add_argument("--drain", type=float, default=2.0)
     parser.add_argument("--rate", type=float, default=1000.0, help="fixed global offered operations/s")
     parser.add_argument("--payload-size", type=int, default=128)
@@ -994,6 +1000,8 @@ def main():
         parser.error("workloads must be direct and/or broadcast")
     if min(args.duration, args.rate, args.drain) <= 0 or args.warmup < 0:
         parser.error("duration, rate, and drain must be positive; warmup cannot be negative")
+    if args.warmup_rate is not None and args.warmup_rate <= 0:
+        parser.error("warmup rate must be positive")
     if args.workers < 1 or args.max_overdue_sends < 1 or args.max_recv_calls < 1:
         parser.error("worker and fairness limits must be positive")
     if (not 0 <= args.max_missed_offer_ratio <= 1 or

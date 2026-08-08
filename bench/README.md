@@ -104,6 +104,10 @@ calls and 64 KiB per selector iteration. Trial rows include generator CPU,
 p50/p95/p99 scheduling lag, missed offers, worker start skew, partial client
 sends, and maximum delay between a selector return and read service.
 
+Warmup rate is independent from measured offered rate and defaults to 1K/s.
+Use `--warmup-rate` to change it. This prevents an overload probe from
+disconnecting clients before interval counters and validity checks begin.
+
 ## Validity
 
 Every row contains `valid` and `invalid_reasons`. By default a normal trial is

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from bench.benchmark import (
     SERVER_METRIC_FIELDS,
     classify_result,
+    configured_warmup_rate,
     due_offers,
     empty_state,
     flush_client_send,
@@ -65,6 +66,12 @@ class BenchmarkWorkerTests(unittest.TestCase):
         self.assertEqual(len(ready), 2)
         self.assertTrue(all(offer[1] for offer in ready))
         self.assertEqual(len(schedule), 3)
+
+    def test_warmup_rate_is_independent_from_pressure_rate(self):
+        args = SimpleNamespace(rate=25000, warmup_rate=None)
+        self.assertEqual(configured_warmup_rate(args), 1000)
+        args.warmup_rate = 500
+        self.assertEqual(configured_warmup_rate(args), 500)
 
     def test_ready_clients_rotate_fairly(self):
         events = [(index, selectors.EVENT_READ) for index in range(3)]

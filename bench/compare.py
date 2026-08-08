@@ -132,7 +132,8 @@ def metadata(args, result_directory, implementations, git_sha, dirty_status, gro
         "workload_groups": groups,
         "parameters": {
             "runs": args.runs, "duration": args.duration, "warmup": args.warmup,
-            "drain": args.drain, "payload_size": args.payload_size,
+            "warmup_rate": args.warmup_rate, "drain": args.drain,
+            "payload_size": args.payload_size,
             "min_delivery_ratio": args.min_delivery_ratio,
             "min_deadline_completion_ratio": args.min_deadline_completion_ratio,
             "max_missed_offer_ratio": args.max_missed_offer_ratio,
@@ -254,7 +255,8 @@ def benchmark_command(args, group, rate, label, output, trial=1):
         "--workloads", group["workload"], "--rate", str(rate), "--runs", "1",
         "--trial-id", str(trial),
         "--duration", str(args.duration), "--warmup", str(args.warmup),
-        "--drain", str(args.drain), "--payload-size", str(args.payload_size),
+        "--warmup-rate", str(args.warmup_rate), "--drain", str(args.drain),
+        "--payload-size", str(args.payload_size),
         "--workers", str(args.workers),
         "--min-delivery-ratio", str(args.min_delivery_ratio),
         "--min-deadline-completion-ratio", str(args.min_deadline_completion_ratio),
@@ -287,6 +289,7 @@ def main():
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--duration", type=float, default=10.0)
     parser.add_argument("--warmup", type=float, default=1.0)
+    parser.add_argument("--warmup-rate", type=float, default=1000.0)
     parser.add_argument("--drain", type=float, default=2.0)
     parser.add_argument("--payload-size", type=int, default=128)
     parser.add_argument("--workers", type=int, default=max(1, min(4, os.cpu_count() or 1)))
